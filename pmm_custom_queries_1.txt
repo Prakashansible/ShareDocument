@@ -1,0 +1,648 @@
+# ==========================================
+# PMM3 PostgreSQL 17 Custom Queries (1-10)
+# ==========================================
+# Place these queries in: /usr/local/percona/pmm-agent/config/
+# PMM3 uses pmm-agent for metrics collection
+
+# 1. Long Running Queries Monitor (PostgreSQL 17 Enhanced)
+---
+pg_long_running_queries:
+  query: |
+    SELECT 
+      datname as database,
+      usename as username,
+      pid,
+      application_name,
+      client_addr,
+      state,
+      backend_type,
+      EXTRACT(EPOCH FROM (NOW() - query_start)) as duration_seconds,
+      EXTRACT(EPOCH FROM (NOW() - xact_start)) as transaction_duration_seconds,
+      wait_event_type,
+      wait_event,
+      query_id,
+      LEFT(query, 150) as query_snippet,
+      backend_xid,
+      backend_xmin
+    FROM pg_stat_activity
+    WHERE state NOT IN ('idle')
+      AND query_start IS NOT NULL
+      AND (NOW() - query_start) > interval '5 minutes'
+      AND pid != pg_backend_pid()
+      AND backend_type = 'client backend'
+    ORDER BY duration_seconds DESC;
+  
+  metrics:
+    - database:
+        usage: "LABEL"
+        description: "Database name"
+    - username:
+        usage: "LABEL"
+        description: "User executing query"
+    - pid:
+        usage: "LABEL"
+        description: "Process ID"
+    - application_name:
+        usage: "LABEL"
+        description: "Application name"
+    - backend_type:
+        usage: "LABEL"
+        description: "Backend type (PG17 feature)"
+    - state:
+        usage: "LABEL"
+        description: "Query state"
+    - query_id:
+        usage: "LABEL"
+        description: "Query identifier for correlation"
+    - duration_seconds:
+        usage: "GAUGE"
+        description: "Query duration in seconds"
+    - transaction_duration_seconds:
+        usage: "GAUGE"
+        description: "Transaction duration in seconds"
+
+# PMM3 Alert Rule (VictoriaMetrics/Prometheus format):
+# alert: PostgreSQL17LongRunningQueries
+# expr: pg_long_running_queries_duration_seconds > 1800
+# for: 5m
+# labels:
+#   severity: warning
+#   tier: database
+#   component: postgresql
+# annotations:
+#   summary: "Long running query detected on {{ $labels.database }}"
+#   description: "Query (ID: {{ $labels.query_id }}) running for {{ $value }}s on database {{ $labels.database }} by user {{ $labels.username }}. Backend Type: {{ $labels.backend_type }}"
+#   runbook_url: "https://wiki.company.com/runbooks/postgresql-long-queries"
+
+# ==========================================
+
+# 2. Bloat Detection with TOAST Tables (PostgreSQL 17)
+---
+pg_table_bloat:
+  query: |
+    SELECT 
+      schemaname,
+      tablename,
+      pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as total_size,
+      pg_total_relation_size(schemaname||'.'||tablename) as total_bytes,
+      (SELECT (dead_tuple_percent) FROM pgstattuple(schemaname||'.'||tablename)) as bloat_percentage,
+      pg_size_pretty(pg_table_size(schemaname||'.'||tablename)) as table_size,
+      pg_size_pretty(pg_indexes_size(schemaname||'.'||tablename)) as indexes_size,
+      (SELECT reltoastrelid::regclass FROM pg_class WHERE relname = tablename AND relnamespace = schemaname::regnamespace) as toast_table
+    FROM pg_tables
+    WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+      AND pg_total_relation_size(schemaname||'.'||tablename) > 1073741824  -- > 1GB
+    ORDER BY bloat_percentage DESC NULLS LAST
+    LIMIT 50;
+  
+  metrics:
+    - schemaname:
+        usage: "LABEL"
+        description: "Schema name"
+    - tablename:
+        usage: "LABEL"
+        description: "Table name"
+    - total_bytes:
+        usage: "GAUGE"
+        description: "Total table size in bytes"
+    - bloat_percentage:
+        usage: "GAUGE"
+        description: "Percentage of dead tuples"
+
+# PMM3 Alert Rule:
+# alert: PostgreSQL17HighTableBloat
+# expr: pg_table_bloat_bloat_percentage > 30
+# for: 2h
+# labels:
+#   severity: warning
+#   tier: database
+#   maintenance: required
+# annotations:
+#   summary: "High bloat detected in table {{ $labels.tablename }}"
+#   description: "Table {{ $labels.schemaname }}.{{ $labels.tablename }} has {{ $value }}% bloat. Consider running VACUUM FULL or pg_repack."
+#   action: "VACUUM FULL {{ $labels.schemaname }}.{{ $labels.tablename }};"
+
+# ==========================================
+
+# 3. Replication Lag Monitor (PostgreSQL 17 Enhanced Slots)
+---
+pg_replication_lag:
+  query: |
+    SELECT 
+      slot_name,
+      client_addr,
+      application_name,
+      state,
+      sync_state,
+      sync_priority,
+      COALESCE(EXTRACT(EPOCH FROM (NOW() - write_lag)), 0) as write_lag_seconds,
+      COALESCE(EXTRACT(EPOCH FROM (NOW() - flush_lag)), 0) as flush_lag_seconds,
+      COALESCE(EXTRACT(EPOCH FROM (NOW() - replay_lag)), 0) as replay_lag_seconds,
+      (pg_wal_lsn_diff(pg_current_wal_lsn(), sent_lsn) / 1024 / 1024)::numeric(10,2) as sent_lag_mb,
+      (pg_wal_lsn_diff(pg_current_wal_lsn(), write_lsn) / 1024 / 1024)::numeric(10,2) as write_lag_mb,
+      (pg_wal_lsn_diff(pg_current_wal_lsn(), flush_lsn) / 1024 / 1024)::numeric(10,2) as flush_lag_mb,
+      (pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) / 1024 / 1024)::numeric(10,2) as replay_lag_mb,
+      reply_time,
+      backend_start
+    FROM pg_stat_replication psr
+    LEFT JOIN pg_replication_slots prs ON psr.pid = prs.active_pid;
+  
+  metrics:
+    - slot_name:
+        usage: "LABEL"
+        description: "Replication slot name"
+    - client_addr:
+        usage: "LABEL"
+        description: "Replica IP address"
+    - application_name:
+        usage: "LABEL"
+        description: "Replica application name"
+    - state:
+        usage: "LABEL"
+        description: "Replication state"
+    - sync_state:
+        usage: "LABEL"
+        description: "Sync state"
+    - sync_priority:
+        usage: "GAUGE"
+        description: "Synchronous standby priority"
+    - write_lag_seconds:
+        usage: "GAUGE"
+        description: "Write lag in seconds"
+    - flush_lag_seconds:
+        usage: "GAUGE"
+        description: "Flush lag in seconds"
+    - replay_lag_seconds:
+        usage: "GAUGE"
+        description: "Replay lag in seconds"
+    - replay_lag_mb:
+        usage: "GAUGE"
+        description: "Replication lag in MB"
+
+# PMM3 Alert Rules:
+# alert: PostgreSQL17ReplicationLagCritical
+# expr: pg_replication_lag_replay_lag_seconds > 300
+# for: 5m
+# labels:
+#   severity: critical
+#   tier: database
+#   component: replication
+# annotations:
+#   summary: "Critical replication lag on {{ $labels.application_name }}"
+#   description: "Replica {{ $labels.application_name }} (slot: {{ $labels.slot_name }}) is {{ $value }}s behind primary. Replay lag: {{ $labels.replay_lag_mb }}MB"
+
+# alert: PostgreSQL17ReplicationSlotLag
+# expr: pg_replication_lag_replay_lag_mb > 10240  # 10GB
+# for: 15m
+# labels:
+#   severity: warning
+#   tier: database
+# annotations:
+#   summary: "Large replication slot lag"
+#   description: "Replication slot {{ $labels.slot_name }} has {{ $value }}MB of WAL lag"
+
+# ==========================================
+
+# 4. Connection Pool Saturation with Reserved Connections (PG17)
+---
+pg_connection_saturation:
+  query: |
+    WITH connection_stats AS (
+      SELECT 
+        state,
+        COUNT(*) as connection_count
+      FROM pg_stat_activity
+      GROUP BY state
+    ),
+    settings AS (
+      SELECT 
+        (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') as max_connections,
+        (SELECT setting::int FROM pg_settings WHERE name = 'superuser_reserved_connections') as superuser_reserved,
+        (SELECT setting::int FROM pg_settings WHERE name = 'reserved_connections') as reserved_connections
+    )
+    SELECT 
+      COALESCE(cs.state, 'total') as state,
+      COALESCE(cs.connection_count, (SELECT COUNT(*) FROM pg_stat_activity)) as connection_count,
+      s.max_connections,
+      s.superuser_reserved,
+      s.reserved_connections,
+      (s.max_connections - s.superuser_reserved - s.reserved_connections) as usable_connections,
+      ROUND((COALESCE(cs.connection_count, (SELECT COUNT(*) FROM pg_stat_activity))::numeric / 
+             (s.max_connections - s.superuser_reserved - s.reserved_connections)::numeric * 100), 2) as usage_percentage
+    FROM connection_stats cs
+    CROSS JOIN settings s
+    UNION ALL
+    SELECT 
+      'total' as state,
+      COUNT(*) as connection_count,
+      (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') as max_connections,
+      (SELECT setting::int FROM pg_settings WHERE name = 'superuser_reserved_connections') as superuser_reserved,
+      (SELECT setting::int FROM pg_settings WHERE name = 'reserved_connections') as reserved_connections,
+      (SELECT (setting::int - 
+              (SELECT setting::int FROM pg_settings WHERE name = 'superuser_reserved_connections') -
+              (SELECT setting::int FROM pg_settings WHERE name = 'reserved_connections'))
+       FROM pg_settings WHERE name = 'max_connections') as usable_connections,
+      ROUND((COUNT(*)::numeric / 
+            ((SELECT setting::int FROM pg_settings WHERE name = 'max_connections') -
+             (SELECT setting::int FROM pg_settings WHERE name = 'superuser_reserved_connections') -
+             (SELECT setting::int FROM pg_settings WHERE name = 'reserved_connections'))::numeric * 100), 2) as usage_percentage
+    FROM pg_stat_activity;
+  
+  metrics:
+    - state:
+        usage: "LABEL"
+        description: "Connection state"
+    - connection_count:
+        usage: "GAUGE"
+        description: "Number of connections"
+    - max_connections:
+        usage: "GAUGE"
+        description: "Maximum allowed connections"
+    - usable_connections:
+        usage: "GAUGE"
+        description: "Usable connections (excluding reserved)"
+    - usage_percentage:
+        usage: "GAUGE"
+        description: "Connection pool usage percentage"
+
+# PMM3 Alert Rule:
+# alert: PostgreSQL17ConnectionPoolSaturation
+# expr: pg_connection_saturation_usage_percentage{state="total"} > 80
+# for: 5m
+# labels:
+#   severity: warning
+#   tier: database
+# annotations:
+#   summary: "Connection pool nearly saturated"
+#   description: "Connection usage at {{ $value }}% of usable connections ({{ $labels.usable_connections }} available)"
+
+# ==========================================
+
+# 5. Deadlock Detection with Query Details
+---
+pg_deadlocks:
+  query: |
+    SELECT 
+      datname as database,
+      deadlocks,
+      conflicts,
+      temp_files,
+      temp_bytes,
+      blk_read_time,
+      blk_write_time
+    FROM pg_stat_database
+    WHERE datname IS NOT NULL
+      AND datname NOT IN ('template0', 'template1')
+    ORDER BY deadlocks DESC;
+  
+  metrics:
+    - database:
+        usage: "LABEL"
+        description: "Database name"
+    - deadlocks:
+        usage: "COUNTER"
+        description: "Total deadlocks"
+    - conflicts:
+        usage: "COUNTER"
+        description: "Total conflicts"
+    - temp_files:
+        usage: "COUNTER"
+        description: "Temporary files created"
+    - temp_bytes:
+        usage: "COUNTER"
+        description: "Temporary bytes written"
+
+# PMM3 Alert Rule:
+# alert: PostgreSQL17DeadlocksDetected
+# expr: rate(pg_deadlocks_deadlocks[5m]) > 0.1
+# for: 3m
+# labels:
+#   severity: warning
+#   tier: database
+# annotations:
+#   summary: "Deadlocks detected in database {{ $labels.database }}"
+#   description: "{{ $value }} deadlocks per second in {{ $labels.database }}. Review application locking patterns."
+
+# ==========================================
+
+# 6. Checkpoint and WAL Performance (PostgreSQL 17)
+---
+pg_checkpoint_stats:
+  query: |
+    SELECT 
+      checkpoints_timed,
+      checkpoints_req as checkpoints_requested,
+      checkpoint_write_time,
+      checkpoint_sync_time,
+      buffers_checkpoint,
+      buffers_clean,
+      buffers_backend,
+      buffers_backend_fsync,
+      buffers_alloc,
+      maxwritten_clean,
+      ROUND((checkpoints_req::numeric / NULLIF((checkpoints_timed + checkpoints_req), 0) * 100), 2) as forced_checkpoint_ratio,
+      stats_reset
+    FROM pg_stat_bgwriter;
+  
+  metrics:
+    - checkpoints_timed:
+        usage: "COUNTER"
+        description: "Scheduled checkpoints"
+    - checkpoints_requested:
+        usage: "COUNTER"
+        description: "Requested checkpoints"
+    - checkpoint_write_time:
+        usage: "COUNTER"
+        description: "Time spent writing checkpoints (ms)"
+    - checkpoint_sync_time:
+        usage: "COUNTER"
+        description: "Time spent syncing checkpoints (ms)"
+    - buffers_checkpoint:
+        usage: "COUNTER"
+        description: "Buffers written during checkpoints"
+    - buffers_clean:
+        usage: "COUNTER"
+        description: "Buffers written by background writer"
+    - buffers_backend:
+        usage: "COUNTER"
+        description: "Buffers written by backends"
+    - buffers_backend_fsync:
+        usage: "COUNTER"
+        description: "Backend fsync calls"
+    - maxwritten_clean:
+        usage: "COUNTER"
+        description: "Background writer stops due to max writes"
+    - forced_checkpoint_ratio:
+        usage: "GAUGE"
+        description: "Percentage of forced checkpoints"
+
+# PMM3 Alert Rule:
+# alert: PostgreSQL17HighForcedCheckpoints
+# expr: pg_checkpoint_stats_forced_checkpoint_ratio > 50
+# for: 15m
+# labels:
+#   severity: warning
+#   tier: database
+#   tuning: required
+# annotations:
+#   summary: "High ratio of forced checkpoints"
+#   description: "{{ $value }}% of checkpoints are forced. Consider increasing checkpoint_timeout or max_wal_size."
+
+# ==========================================
+
+# 7. Index Usage Analysis (PostgreSQL 17 with better stats)
+---
+pg_unused_indexes:
+  query: |
+    SELECT 
+      pui.schemaname,
+      pui.tablename,
+      pui.indexname,
+      pui.idx_scan as index_scans,
+      pui.idx_tup_read as tuples_read,
+      pui.idx_tup_fetch as tuples_fetched,
+      pg_size_pretty(pg_relation_size(pui.indexrelid)) as index_size,
+      pg_relation_size(pui.indexrelid) as index_bytes,
+      pg_size_pretty(pg_relation_size(pui.relid)) as table_size,
+      am.amname as index_type,
+      ROUND((pui.idx_scan::numeric / NULLIF((SELECT SUM(idx_scan) FROM pg_stat_user_indexes WHERE schemaname = pui.schemaname AND tablename = pui.tablename), 0) * 100), 2) as scan_ratio
+    FROM pg_stat_user_indexes pui
+    JOIN pg_index pi ON pui.indexrelid = pi.indexrelid
+    JOIN pg_class pc ON pi.indexrelid = pc.oid
+    JOIN pg_am am ON pc.relam = am.oid
+    WHERE pui.idx_scan < 100
+      AND pui.schemaname NOT IN ('pg_catalog', 'information_schema')
+      AND pg_relation_size(pui.indexrelid) > 10485760  -- > 10MB
+      AND NOT pi.indisunique  -- Exclude unique indexes
+      AND NOT pi.indisprimary  -- Exclude primary keys
+    ORDER BY pg_relation_size(pui.indexrelid) DESC
+    LIMIT 30;
+  
+  metrics:
+    - schemaname:
+        usage: "LABEL"
+        description: "Schema name"
+    - tablename:
+        usage: "LABEL"
+        description: "Table name"
+    - indexname:
+        usage: "LABEL"
+        description: "Index name"
+    - index_type:
+        usage: "LABEL"
+        description: "Index access method (btree, hash, etc.)"
+    - index_scans:
+        usage: "GAUGE"
+        description: "Number of index scans"
+    - tuples_read:
+        usage: "COUNTER"
+        description: "Tuples read from index"
+    - tuples_fetched:
+        usage: "COUNTER"
+        description: "Tuples fetched using index"
+    - index_bytes:
+        usage: "GAUGE"
+        description: "Index size in bytes"
+
+# PMM3 Alert Rule:
+# alert: PostgreSQL17UnusedIndexes
+# expr: pg_unused_indexes_index_scans < 10 and pg_unused_indexes_index_bytes > 104857600
+# for: 7d
+# labels:
+#   severity: info
+#   tier: database
+#   optimization: index
+# annotations:
+#   summary: "Potentially unused index {{ $labels.indexname }}"
+#   description: "Index {{ $labels.indexname }} ({{ $labels.index_type }}) on {{ $labels.tablename }} has only {{ $value }} scans. Consider dropping if not needed for constraints."
+
+# ==========================================
+
+# 8. Transaction ID Wraparound Risk (PostgreSQL 17)
+---
+pg_transaction_wraparound:
+  query: |
+    SELECT 
+      datname as database,
+      age(datfrozenxid) as xid_age,
+      2147483647 - age(datfrozenxid) as xids_remaining,
+      ROUND((age(datfrozenxid)::numeric / 2147483647::numeric * 100), 2) as wraparound_risk_percentage,
+      mxid_age(datminmxid) as mxid_age,
+      2147483647 - mxid_age(datminmxid) as mxids_remaining,
+      ROUND((mxid_age(datminmxid)::numeric / 2147483647::numeric * 100), 2) as mxid_wraparound_risk_percentage
+    FROM pg_database
+    WHERE datname IS NOT NULL
+      AND datname NOT IN ('template0', 'template1')
+    ORDER BY xid_age DESC;
+  
+  metrics:
+    - database:
+        usage: "LABEL"
+        description: "Database name"
+    - xid_age:
+        usage: "GAUGE"
+        description: "Current transaction ID age"
+    - xids_remaining:
+        usage: "GAUGE"
+        description: "Transactions remaining before wraparound"
+    - wraparound_risk_percentage:
+        usage: "GAUGE"
+        description: "Percentage towards XID wraparound"
+    - mxid_age:
+        usage: "GAUGE"
+        description: "MultiXact ID age"
+    - mxids_remaining:
+        usage: "GAUGE"
+        description: "MultiXact IDs remaining"
+    - mxid_wraparound_risk_percentage:
+        usage: "GAUGE"
+        description: "Percentage towards MultiXact wraparound"
+
+# PMM3 Alert Rules:
+# alert: PostgreSQL17TransactionWraparoundDanger
+# expr: pg_transaction_wraparound_wraparound_risk_percentage > 50
+# for: 1h
+# labels:
+#   severity: critical
+#   tier: database
+#   emergency: true
+# annotations:
+#   summary: "Transaction wraparound risk in {{ $labels.database }}"
+#   description: "Database {{ $labels.database }} is {{ $value }}% towards wraparound. Run aggressive VACUUM immediately!"
+
+# alert: PostgreSQL17MultiXactWraparound
+# expr: pg_transaction_wraparound_mxid_wraparound_risk_percentage > 50
+# for: 1h
+# labels:
+#   severity: critical
+# annotations:
+#   summary: "MultiXact wraparound risk in {{ $labels.database }}"
+#   description: "Database {{ $labels.database }} MultiXact age at {{ $value }}%"
+
+# ==========================================
+
+# 9. Cache Hit Ratio with I/O Timing (PostgreSQL 17)
+---
+pg_cache_hit_ratio:
+  query: |
+    SELECT 
+      datname as database,
+      blks_hit,
+      blks_read,
+      CASE WHEN (blks_hit + blks_read) > 0 
+        THEN ROUND((blks_hit::numeric / (blks_hit + blks_read)::numeric * 100), 2)
+        ELSE 100.0
+      END as cache_hit_ratio,
+      blk_read_time,
+      blk_write_time,
+      CASE WHEN blks_read > 0
+        THEN ROUND(blk_read_time::numeric / blks_read::numeric, 2)
+        ELSE 0
+      END as avg_read_time_ms,
+      tup_returned,
+      tup_fetched,
+      tup_inserted,
+      tup_updated,
+      tup_deleted
+    FROM pg_stat_database
+    WHERE datname IS NOT NULL
+      AND datname NOT IN ('template0', 'template1');
+  
+  metrics:
+    - database:
+        usage: "LABEL"
+        description: "Database name"
+    - blks_hit:
+        usage: "COUNTER"
+        description: "Blocks hit in cache"
+    - blks_read:
+        usage: "COUNTER"
+        description: "Blocks read from disk"
+    - cache_hit_ratio:
+        usage: "GAUGE"
+        description: "Cache hit ratio percentage"
+    - blk_read_time:
+        usage: "COUNTER"
+        description: "Time spent reading blocks (ms)"
+    - blk_write_time:
+        usage: "COUNTER"
+        description: "Time spent writing blocks (ms)"
+    - avg_read_time_ms:
+        usage: "GAUGE"
+        description: "Average read time per block (ms)"
+
+# PMM3 Alert Rule:
+# alert: PostgreSQL17LowCacheHitRatio
+# expr: pg_cache_hit_ratio_cache_hit_ratio < 90
+# for: 15m
+# labels:
+#   severity: warning
+#   tier: database
+#   tuning: memory
+# annotations:
+#   summary: "Low cache hit ratio on {{ $labels.database }}"
+#   description: "Cache hit ratio is {{ $value }}% on database {{ $labels.database }}. Consider increasing shared_buffers."
+
+# ==========================================
+
+# 10. VACUUM and ANALYZE Progress (PostgreSQL 17)
+---
+pg_vacuum_progress:
+  query: |
+    SELECT 
+      pv.datname as database,
+      pv.relid::regclass as table_name,
+      pv.phase,
+      pv.heap_blks_total,
+      pv.heap_blks_scanned,
+      pv.heap_blks_vacuumed,
+      pv.index_vacuum_count,
+      pv.max_dead_tuples,
+      pv.num_dead_tuples,
+      ROUND((pv.heap_blks_scanned::numeric / NULLIF(pv.heap_blks_total, 0)::numeric * 100), 2) as progress_percentage,
+      EXTRACT(EPOCH FROM (NOW() - pa.query_start)) as vacuum_duration_seconds,
+      EXTRACT(EPOCH FROM (NOW() - pa.xact_start)) as transaction_duration_seconds,
+      pa.wait_event_type,
+      pa.wait_event
+    FROM pg_stat_progress_vacuum pv
+    JOIN pg_stat_activity pa ON pv.pid = pa.pid;
+  
+  metrics:
+    - database:
+        usage: "LABEL"
+        description: "Database name"
+    - table_name:
+        usage: "LABEL"
+        description: "Table being vacuumed"
+    - phase:
+        usage: "LABEL"
+        description: "Current vacuum phase"
+    - heap_blks_total:
+        usage: "GAUGE"
+        description: "Total blocks to process"
+    - heap_blks_scanned:
+        usage: "GAUGE"
+        description: "Blocks scanned"
+    - heap_blks_vacuumed:
+        usage: "GAUGE"
+        description: "Blocks vacuumed"
+    - index_vacuum_count:
+        usage: "GAUGE"
+        description: "Number of index vacuum cycles"
+    - progress_percentage:
+        usage: "GAUGE"
+        description: "Vacuum progress percentage"
+    - vacuum_duration_seconds:
+        usage: "GAUGE"
+        description: "Vacuum duration in seconds"
+
+# PMM3 Alert Rule:
+# alert: PostgreSQL17VacuumStuck
+# expr: pg_vacuum_progress_vacuum_duration_seconds > 7200 and pg_vacuum_progress_progress_percentage < 50
+# for: 30m
+# labels:
+#   severity: warning
+#   tier: database
+# annotations:
+#   summary: "Vacuum appears stuck on {{ $labels.table_name }}"
+#   description: "Vacuum running for {{ $value }}s with only {{ $labels.progress_percentage }}% complete in phase {{ $labels.phase }}"
