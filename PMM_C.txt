@@ -1,0 +1,381 @@
+I'll provide comprehensive step-by-step instructions for setting up PMM (Percona Monitoring and Management) to monitor blocked queries/sessions in PostgreSQL and configure alerting.
+
+## Step-by-Step Guide: PMM PostgreSQL Blocked Sessions Monitoring & Alerting
+
+### Prerequisites
+- PMM Server running (version 2.x)
+- PostgreSQL instance registered with PMM
+- Access to PMM UI and PostgreSQL database
+
+---
+
+### Part 1: Enable PostgreSQL Query Analytics
+
+**Step 1: Configure PostgreSQL for Monitoring**
+
+First, ensure your PostgreSQL instance has the necessary extensions and permissions:
+
+```sql
+-- Connect to your PostgreSQL database
+psql -U postgres -d your_database
+
+-- Create pg_stat_statements extension (if not exists)
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- Verify pmm user has necessary permissions
+GRANT pg_monitor TO pmm;
+GRANT EXECUTE ON FUNCTION pg_stat_activity TO pmm;
+```
+
+**Step 2: Verify PMM Agent Configuration**
+
+Check that your pmm-agent is configured to collect PostgreSQL metrics:
+
+```bash
+# On the PostgreSQL host
+sudo pmm-admin list
+
+# Ensure postgres_exporter is running
+# If not, add it:
+sudo pmm-admin add postgresql \
+  --username=pmm \
+  --password=your_password \
+  --query-source=pgstatements \
+  --host=localhost \
+  --port=5432 \
+  postgresql-instance-name
+```
+
+---
+
+### Part 2: Create Custom Query for Blocked Sessions
+
+**Step 3: Create PostgreSQL Query to Detect Blocked Sessions**
+
+Log into your PostgreSQL database and create a custom monitoring query:
+
+```sql
+-- This query identifies blocked sessions
+SELECT 
+    blocked_locks.pid AS blocked_pid,
+    blocked_activity.usename AS blocked_user,
+    blocking_locks.pid AS blocking_pid,
+    blocking_activity.usename AS blocking_user,
+    blocked_activity.query AS blocked_statement,
+    blocking_activity.query AS blocking_statement,
+    blocked_activity.application_name AS blocked_application,
+    blocking_activity.application_name AS blocking_application,
+    blocked_activity.wait_event_type AS blocked_wait_event_type,
+    blocked_activity.wait_event AS blocked_wait_event,
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - blocked_activity.query_start)) AS blocked_duration_seconds,
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - blocking_activity.query_start)) AS blocking_duration_seconds
+FROM pg_catalog.pg_locks blocked_locks
+JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+JOIN pg_catalog.pg_locks blocking_locks 
+    ON blocking_locks.locktype = blocked_locks.locktype
+    AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+    AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+    AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+    AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+    AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+    AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+    AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+    AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+    AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+    AND blocking_locks.pid != blocked_locks.pid
+JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+WHERE NOT blocked_locks.granted;
+```
+
+---
+
+### Part 3: Create Custom Exporter for Blocked Sessions
+
+**Step 4: Create Custom Queries File**
+
+Create a custom queries YAML file for postgres_exporter:
+
+```bash
+# Create directory for custom queries
+sudo mkdir -p /etc/pmm-agent/queries
+
+# Create the custom query file
+sudo nano /etc/pmm-agent/queries/postgresql-blocked-sessions.yml
+```
+
+Add the following content:
+
+```yaml
+pg_blocked_sessions:
+  query: |
+    SELECT 
+        COUNT(*) as blocked_count,
+        MAX(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - blocked_activity.query_start))) AS max_blocked_duration_seconds
+    FROM pg_catalog.pg_locks blocked_locks
+    JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+    JOIN pg_catalog.pg_locks blocking_locks 
+        ON blocking_locks.locktype = blocked_locks.locktype
+        AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+        AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+        AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+        AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+        AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+        AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+        AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+        AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+        AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+        AND blocking_locks.pid != blocked_locks.pid
+    JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+    WHERE NOT blocked_locks.granted;
+  metrics:
+    - blocked_count:
+        usage: "GAUGE"
+        description: "Number of blocked sessions"
+    - max_blocked_duration_seconds:
+        usage: "GAUGE"
+        description: "Maximum duration of blocked session in seconds"
+```
+
+**Step 5: Configure PMM Agent to Use Custom Queries**
+
+```bash
+# Edit pmm-agent configuration
+sudo nano /etc/pmm-agent.yaml
+```
+
+Add the custom queries file path to your PostgreSQL service configuration, or use the CLI:
+
+```bash
+sudo pmm-admin add postgresql \
+  --username=pmm \
+  --password=your_password \
+  --query-source=pgstatements \
+  --custom-queries=/etc/pmm-agent/queries/postgresql-blocked-sessions.yml \
+  postgresql-instance-name
+```
+
+**Step 6: Restart PMM Agent**
+
+```bash
+sudo systemctl restart pmm-agent
+```
+
+---
+
+### Part 4: Create Grafana Dashboard
+
+**Step 7: Access PMM UI**
+
+1. Open your browser and navigate to: `https://your-pmm-server`
+2. Log in with your credentials
+
+**Step 8: Create Dashboard for Blocked Sessions**
+
+1. Click on **"+"** → **"Dashboard"** → **"Add new panel"**
+2. In the query editor, add:
+
+```promql
+# Query 1: Number of blocked sessions
+pg_blocked_sessions_blocked_count{instance="your-instance"}
+
+# Query 2: Maximum blocked duration
+pg_blocked_sessions_max_blocked_duration_seconds{instance="your-instance"}
+```
+
+3. Configure panel settings:
+   - **Panel Title**: "PostgreSQL Blocked Sessions"
+   - **Visualization**: Graph or Stat
+   - **Unit**: Number (for count), Seconds (for duration)
+
+4. Add a table panel for detailed blocked sessions:
+
+```promql
+# This will show when blocks occur
+rate(pg_blocked_sessions_blocked_count[5m]) > 0
+```
+
+5. Save the dashboard with name: **"PostgreSQL Blocked Sessions Monitor"**
+
+---
+
+### Part 5: Configure Alerting Rules
+
+**Step 9: Create Alert Rule in PMM**
+
+1. In PMM UI, go to **Alerting** → **Alert rules** → **New alert rule**
+
+2. Configure the alert:
+
+**Alert Rule Configuration:**
+
+```yaml
+Name: PostgreSQL Blocked Sessions Alert
+Type: Grafana managed alert
+
+Query:
+- Query: pg_blocked_sessions_blocked_count{instance=~"$instance"}
+- Condition: LAST value > 0 FOR 2m
+
+Alert Evaluation:
+- Evaluate every: 1m
+- For: 2m (fires after 2 minutes of continuous blocking)
+
+Expression:
+- WHEN: last() OF query(A, 1m, now) IS ABOVE 0
+
+Labels:
+- severity: warning
+- service: postgresql
+- alert_type: blocked_sessions
+
+Annotations:
+- summary: "PostgreSQL has blocked sessions on {{ $labels.instance }}"
+- description: "{{ $value }} session(s) are currently blocked on PostgreSQL instance {{ $labels.instance }}"
+```
+
+**Step 10: Create Critical Alert for Long Blocks**
+
+Create a second alert for sessions blocked longer than 5 minutes:
+
+```yaml
+Name: PostgreSQL Long Blocked Sessions Critical
+Type: Grafana managed alert
+
+Query:
+- Query: pg_blocked_sessions_max_blocked_duration_seconds{instance=~"$instance"}
+- Condition: LAST value > 300 (5 minutes)
+
+Expression:
+- WHEN: last() OF query(A, 1m, now) IS ABOVE 300
+
+Labels:
+- severity: critical
+- service: postgresql
+- alert_type: long_blocked_sessions
+
+Annotations:
+- summary: "PostgreSQL has long-running blocked sessions on {{ $labels.instance }}"
+- description: "A session has been blocked for {{ $value }} seconds on instance {{ $labels.instance }}"
+```
+
+---
+
+### Part 6: Configure Notification Channels
+
+**Step 11: Setup Alert Notification**
+
+1. Go to **Alerting** → **Contact points** → **New contact point**
+
+2. Configure your preferred notification method:
+
+**Email Configuration:**
+```yaml
+Name: PostgreSQL DBA Team
+Type: Email
+Addresses: dba-team@yourcompany.com
+```
+
+**Slack Configuration:**
+```yaml
+Name: DBA Slack Channel
+Type: Slack
+Webhook URL: your-slack-webhook-url
+Channel: #database-alerts
+```
+
+**Step 12: Create Notification Policy**
+
+1. Go to **Alerting** → **Notification policies**
+2. Add a new policy:
+
+```yaml
+Matcher:
+- service = postgresql
+- alert_type = blocked_sessions OR alert_type = long_blocked_sessions
+
+Contact point: PostgreSQL DBA Team (or your configured contact point)
+```
+
+---
+
+### Part 7: Testing and Validation
+
+**Step 13: Test the Blocked Session Detection**
+
+Create a test scenario to trigger the alert:
+
+```sql
+-- Session 1: Start a transaction and lock a table
+BEGIN;
+LOCK TABLE your_test_table IN ACCESS EXCLUSIVE MODE;
+-- Keep this session open
+
+-- Session 2: Try to access the locked table
+SELECT * FROM your_test_table; -- This will block
+```
+
+Wait for 2-3 minutes and verify:
+1. The metric appears in Grafana dashboard
+2. The alert fires in PMM UI
+3. You receive notification via configured channel
+
+**Step 14: Cleanup Test**
+
+```sql
+-- In Session 1:
+ROLLBACK;
+```
+
+---
+
+### Part 8: Create Detailed Dashboard (Optional)
+
+**Step 15: Enhanced Dashboard with Details**
+
+Create a comprehensive dashboard with multiple panels:
+
+1. **Panel 1**: Blocked Sessions Count (Stat)
+2. **Panel 2**: Max Blocked Duration (Graph)
+3. **Panel 3**: Blocked Sessions Over Time (Time Series)
+4. **Panel 4**: Table showing pg_stat_activity for blocked queries
+
+For the detailed table panel, you can use the direct PostgreSQL data source:
+
+```sql
+SELECT 
+    blocked_locks.pid AS blocked_pid,
+    blocked_activity.usename AS blocked_user,
+    blocking_locks.pid AS blocking_pid,
+    blocking_activity.usename AS blocking_user,
+    LEFT(blocked_activity.query, 100) AS blocked_query,
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - blocked_activity.query_start)) AS seconds_blocked
+FROM pg_catalog.pg_locks blocked_locks
+JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+JOIN pg_catalog.pg_locks blocking_locks 
+    ON blocking_locks.locktype = blocked_locks.locktype
+    AND blocking_locks.pid != blocked_locks.pid
+JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+WHERE NOT blocked_locks.granted
+ORDER BY seconds_blocked DESC;
+```
+
+---
+
+### Summary
+
+You've now successfully:
+- ✅ Configured PostgreSQL for monitoring blocked sessions
+- ✅ Created custom metrics for blocked session detection
+- ✅ Built Grafana dashboards to visualize blocked sessions
+- ✅ Set up alert rules with appropriate thresholds
+- ✅ Configured notification channels for alerts
+
+### Best Practices
+
+1. **Tune alert thresholds** based on your workload (2 minutes might be too aggressive for some systems)
+2. **Monitor alert fatigue** - adjust sensitivity if getting too many false positives
+3. **Document response procedures** for when alerts fire
+4. **Regular review** of blocked session patterns to identify application issues
+5. **Consider auto-remediation** for known patterns (with caution)
+
+Would you like me to help with any specific part of this setup or create additional monitoring queries for other PostgreSQL metrics?
