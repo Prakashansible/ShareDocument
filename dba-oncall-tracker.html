@@ -1,0 +1,1508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DBA OnCall Tracker</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 10px; }
+    ::-webkit-scrollbar-thumb { background: linear-gradient(180deg,#94a3b8,#cbd5e1); border-radius: 10px; }
+    ::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg,#64748b,#94a3b8); }
+    @keyframes slideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .toast { animation: slideUp 0.2s ease; }
+    .day-btn { transition: all 0.15s ease; }
+    .day-btn:not(:disabled):not(.selected):hover { transform: translateY(-1px); }
+    input[type="date"]::-webkit-datetime-edit { text-transform: uppercase; }
+    input[type="date"]::-webkit-datetime-edit-fields-wrapper { text-transform: uppercase; }
+    .header-glow { box-shadow: 0 4px 24px -4px rgba(59,130,246,0.15), 0 2px 8px -2px rgba(0,0,0,0.3); }
+    .card-elevated { box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.05); }
+    .stat-bar-fill { transition: width 0.6s cubic-bezier(0.4,0,0.2,1); }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    /* ═══════════════════════════════════════════
+       CONSTANTS & UTILS
+    ═══════════════════════════════════════════ */
+    const STORAGE_KEY     = 'dba_oncall_v2';
+    const RES_STORAGE_KEY = 'dba_resources_v2';
+    const ROT_STORAGE_KEY = 'dba_rotgroups_v2';
+    const AMT_STORAGE_KEY    = 'dba_amount_v2';
+    const CUTOFF_STORAGE_KEY = 'dba_cutoff_v2';
+    const DEFAULT_AMOUNT     = 350;
+    const DEFAULT_CUTOFF_DAY = 10;
+    const MONTHS      = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const MONTHS_S    = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const DAYS_S      = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+    /* ── Default DBA team resources (used if nothing saved in localStorage) ── */
+    const DEFAULT_RESOURCES = [
+      { name: 'Syed Tanweer Ahmed',      dt: 'DT73483'  },
+      { name: 'Haji Hamirddin Mohammad', dt: 'DT213807' },
+      { name: 'Satheesh Papishetty',     dt: 'DT222669' },
+      { name: 'Viswanath Kanne',         dt: 'DT202687' },
+      { name: 'Suresh Kumar Metla',      dt: 'DT81402'  },
+      { name: 'Prakash Sankuru',         dt: 'DT204861' },
+    ];
+
+    /* Default rotation groups */
+    const DEFAULT_ROTATION_GROUPS = [
+      { label: 'ORACLE', members: ['Haji Hamirddin Mohammad', 'Syed Tanweer Ahmed', 'Suresh Kumar Metla'] },
+      { label: 'DB2',    members: ['Prakash Sankuru', 'Viswanath Kanne'] },
+      { label: 'MSSQL',  members: ['Satheesh Papishetty'] },
+    ];
+
+    const uid = () => Math.random().toString(36).slice(2,9) + Date.now().toString(36);
+
+    const todayStr = () => new Date().toISOString().split('T')[0];
+
+    /* date → "YYYY-MM-DD" */
+    const toStr = (d) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const dy = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${dy}`;
+    };
+
+    /* "YYYY-MM-DD" → Date (local, no timezone shift) */
+    const fromStr = (s) => {
+      const [y, m, d] = s.split('-').map(Number);
+      return new Date(y, m - 1, d);
+    };
+
+    /* "YYYY-MM-DD" → "MM/DD/YYYY" */
+    const fmtDate = (s) => {
+      if (!s) return '';
+      const [y, m, d] = s.split('-');
+      return `${m}/${d}/${y}`;
+    };
+
+    /* format INR */
+    const fmtMoney = (n) =>
+      '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    const monthKey   = (s) => (s || '').slice(0, 7);
+    const monthLabel = (mk) => { if (!mk) return ''; const [y,m] = mk.split('-'); return `${MONTHS[+m-1]} ${y}`; };
+    const monthShort = (mk) => { if (!mk) return ''; const [y,m] = mk.split('-'); return `${MONTHS_S[+m-1]} '${y.slice(2)}`; };
+
+    /* Monday of the week that contains `date` */
+    const getMondayOf = (date) => {
+      const d = new Date(date);
+      const dow = d.getDay(); // 0=Sun
+      const diff = dow === 0 ? -6 : 1 - dow;
+      d.setDate(d.getDate() + diff);
+      d.setHours(0, 0, 0, 0);
+      return d;
+    };
+
+    /* 7-element array Mon→Sun from a monday */
+    const weekDays = (monday) =>
+      Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(monday);
+        d.setDate(d.getDate() + i);
+        return d;
+      });
+
+    const fmtWeekRange = (monday) => {
+      const days = weekDays(monday);
+      const start = days[0], end = days[6];
+      if (start.getMonth() === end.getMonth())
+        return `${start.getDate()} – ${end.getDate()} ${MONTHS_S[start.getMonth()]} ${start.getFullYear()}`;
+      return `${start.getDate()} ${MONTHS_S[start.getMonth()]} – ${end.getDate()} ${MONTHS_S[end.getMonth()]} ${end.getFullYear()}`;
+    };
+
+    const load  = () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { return []; } };
+    const save  = (e) => localStorage.setItem(STORAGE_KEY, JSON.stringify(e));
+
+    /* Last day of previous month — the latest date allowed for entry */
+    const maxAllowedDate = (() => {
+      const now = new Date();
+      return toStr(new Date(now.getFullYear(), now.getMonth(), 0)); /* day 0 = last day of prev month */
+    })();
+
+    /* Returns true if dateStr is selectable (not current or future month) */
+    const isAllowed = (dateStr) => dateStr <= maxAllowedDate;
+
+    /* Arrears = entry date is older than the start of the previous month */
+    const isArrears = (dateStr) => {
+      const now = new Date();
+      const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      return new Date(dateStr + 'T00:00:00') < prevMonthStart;
+    };
+
+    /* ═══════════════════════════════════════════
+       BADGE
+    ═══════════════════════════════════════════ */
+    const Badge = ({ type }) => (
+      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap tracking-wide
+        ${type === 'Oncall'
+          ? 'bg-blue-600 text-white shadow-sm shadow-blue-200/60'
+          : 'bg-amber-500 text-white shadow-sm shadow-amber-200/60'}`}>
+        {type}
+      </span>
+    );
+
+    /* ═══════════════════════════════════════════
+       STAT CARD
+    ═══════════════════════════════════════════ */
+    const StatCard = ({ label, value, sub, accent }) => (
+      <div className={`bg-white rounded-2xl p-5 card-elevated border-t-4 ${accent} hover:shadow-md transition-all hover:-translate-y-0.5`}>
+        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">{label}</p>
+        <p className="text-2xl font-bold text-gray-800">{value}</p>
+        {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
+      </div>
+    );
+
+    /* ═══════════════════════════════════════════
+       WEEK PICKER
+    ═══════════════════════════════════════════ */
+    const WeekPicker = ({ selected, onToggle, onClearAll, weekStart, onPrev, onNext }) => {
+      const days   = weekDays(weekStart);
+      const today  = todayStr();
+
+      return (
+        <div>
+          {/* Week navigation */}
+          <div className="flex items-center justify-between mb-3">
+            <button onClick={onPrev}
+              className="w-8 h-8 flex items-center justify-center rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500 transition-colors">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            <span className="text-sm font-semibold text-gray-700">{fmtWeekRange(weekStart)}</span>
+            <button onClick={onNext}
+              className="w-8 h-8 flex items-center justify-center rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500 transition-colors">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Day buttons */}
+          <div className="grid grid-cols-7 gap-1.5">
+            {days.map((day, i) => {
+              const ds        = toStr(day);
+              const isSel     = selected.has(ds);
+              const isToday   = ds === today;
+              const isWkend   = i >= 5;
+              const disabled  = !isAllowed(ds);
+
+              return (
+                <button
+                  key={ds}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => !disabled && onToggle(ds)}
+                  className={`day-btn flex flex-col items-center py-3 px-1 rounded-xl border-2 select-none
+                    ${disabled
+                      ? 'bg-gray-50 border-gray-100 text-gray-300 cursor-not-allowed opacity-40'
+                      : isSel
+                        ? 'bg-blue-600 border-blue-600 text-white shadow-md scale-105'
+                        : isToday
+                          ? 'bg-blue-50 border-blue-300 text-blue-700 hover:bg-blue-100'
+                          : isWkend
+                            ? 'bg-orange-50 border-orange-100 text-orange-600 hover:border-orange-300'
+                            : 'bg-gray-50 border-gray-100 text-gray-600 hover:border-blue-200 hover:bg-blue-50'
+                    }`}>
+                  <span className={`text-xs font-semibold mb-0.5 ${isSel ? 'text-blue-100' : ''}`}>
+                    {DAYS_S[i]}
+                  </span>
+                  <span className="text-lg font-bold leading-none">{day.getDate()}</span>
+                  <span className={`text-xs mt-0.5 ${isSel ? 'text-blue-200' : 'text-gray-400'}`}>
+                    {MONTHS_S[day.getMonth()]}
+                  </span>
+                  {isSel && (
+                    <span className="mt-1 w-1.5 h-1.5 rounded-full bg-blue-300"></span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Quick selectors */}
+          <div className="flex gap-2 mt-3 flex-wrap">
+            <button type="button"
+              onClick={() => days.slice(0,5).forEach(d => { const ds=toStr(d); if(isAllowed(ds) && !selected.has(ds)) onToggle(ds); })}
+              className="text-xs px-2.5 py-1 border border-gray-200 rounded-lg text-gray-500 hover:bg-gray-50 transition-colors">
+              + Weekdays
+            </button>
+            <button type="button"
+              onClick={() => days.forEach(d => selected.has(toStr(d)) && onToggle(toStr(d)))}
+              className="text-xs px-2.5 py-1 border border-gray-200 rounded-lg text-gray-500 hover:bg-gray-50 transition-colors">
+              Clear week
+            </button>
+            {selected.size > 0 && (
+              <button type="button" onClick={onClearAll}
+                className="text-xs px-2.5 py-1 border border-red-200 rounded-lg text-red-500 hover:bg-red-50 transition-colors font-semibold ml-auto">
+                ✕ Clear All ({selected.size})
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    /* ═══════════════════════════════════════════
+       SETTINGS MODAL
+    ═══════════════════════════════════════════ */
+    const SettingsModal = ({ resources, rotGroups, amountPerDay, cutoffDay, onSaveResources, onSaveRotGroups, onSaveAmount, onSaveCutoff, onClose }) => {
+      const [tab, setTab]         = useState('resources');
+      const [resList, setResList] = useState(resources.map(r => ({ ...r })));
+      const [rotList, setRotList] = useState(rotGroups.map(g => ({
+        label: g.label || 'Group',
+        members: Array.isArray(g.members) ? [...g.members] : (Array.isArray(g) ? [...g] : []),
+      })));
+      const [newName, setNewName] = useState('');
+      const [newDt,   setNewDt]   = useState('');
+      const [nameErr, setNameErr] = useState('');
+      const [delName, setDelName] = useState('');
+      const [amtInput,    setAmtInput]    = useState(String(amountPerDay));
+      const [amtErr,      setAmtErr]      = useState('');
+      const [cutoffInput, setCutoffInput] = useState(String(cutoffDay));
+      const [cutoffErr,   setCutoffErr]   = useState('');
+
+      const addResource = () => {
+        const n = newName.trim(), d = newDt.trim();
+        if (!n) { setNameErr('Name is required'); return; }
+        if (resList.some(r => r.name.toLowerCase() === n.toLowerCase())) { setNameErr('Name already exists'); return; }
+        setResList(p => [...p, { name: n, dt: d }]);
+        setNewName(''); setNewDt(''); setNameErr('');
+      };
+
+      const removeResource = (name) => {
+        setResList(p => p.filter(r => r.name !== name));
+        setRotList(p => p.map(g => ({ ...g, members: g.members.filter(m => m !== name) })));
+      };
+
+      const addGroup    = () => setRotList(p => [...p, { label: 'New Group', members: [] }]);
+      const removeGroup = (gi) => setRotList(p => p.filter((_, i) => i !== gi));
+      const setGroupLabel = (gi, val) => setRotList(p => p.map((g, i) => i === gi ? { ...g, label: val } : g));
+      const removeMember  = (gi, name) => setRotList(p => p.map((g, i) => i === gi ? { ...g, members: g.members.filter(m => m !== name) } : g));
+      const addMember     = (gi, name) => { if (!name) return; setRotList(p => p.map((g, i) => i === gi ? { ...g, members: [...g.members, name] } : g)); };
+
+      const save = () => {
+        const parsedAmt    = parseFloat(amtInput);
+        const parsedCutoff = parseInt(cutoffInput);
+        if (isNaN(parsedAmt) || parsedAmt <= 0) { setAmtErr('Enter a valid amount greater than 0'); setTab('general'); return; }
+        if (isNaN(parsedCutoff) || parsedCutoff < 1 || parsedCutoff > 28) { setCutoffErr('Enter a day between 1 and 28'); setTab('general'); return; }
+        onSaveResources(resList);
+        onSaveRotGroups(rotList.filter(g => g.members.length > 0));
+        onSaveAmount(parsedAmt);
+        onSaveCutoff(parsedCutoff);
+        onClose();
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl ring-1 ring-black/5 w-full max-w-2xl max-h-[90vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100">
+              <div className="w-9 h-9 bg-gradient-to-br from-slate-600 to-slate-800 rounded-xl flex items-center justify-center">
+                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h2 className="text-base font-bold text-gray-800">Settings</h2>
+                <p className="text-xs text-gray-400">Manage resources and rotation groups</p>
+              </div>
+              <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex border-b border-gray-100 px-6">
+              {[['resources','Resources'],['groups','Rotation Groups'],['cutoff','Cutoff Date'],['general','Amount']].map(([key, label]) => (
+                <button key={key} onClick={() => setTab(key)}
+                  className={`px-4 py-3 text-sm font-semibold border-b-2 transition-colors mr-2
+                    ${tab === key ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+
+              {tab === 'resources' && (
+                <div className="space-y-4">
+                  {/* Current resources list */}
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-gray-50">
+                        <th className="text-left px-3 py-2 text-xs font-bold text-gray-400 uppercase rounded-l-lg">#</th>
+                        <th className="text-left px-3 py-2 text-xs font-bold text-gray-400 uppercase">Name</th>
+                        <th className="text-left px-3 py-2 text-xs font-bold text-gray-400 uppercase rounded-r-lg">DT#</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {resList.map((r, i) => (
+                        <tr key={r.name} className="border-t border-gray-50">
+                          <td className="px-3 py-2.5 text-gray-300 text-xs font-mono">{i+1}</td>
+                          <td className="px-3 py-2.5 font-semibold text-gray-800">{r.name}</td>
+                          <td className="px-3 py-2.5 text-gray-700 font-mono text-xs font-bold">{r.dt || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  {/* Add new resource */}
+                  <div className="border border-dashed border-gray-200 rounded-xl p-4 bg-gray-50">
+                    <p className="text-xs font-bold text-gray-500 uppercase mb-3">Add New Resource</p>
+                    <div className="flex gap-2 flex-wrap">
+                      <div className="flex-1 min-w-[180px]">
+                        <input value={newName} onChange={e => { setNewName(e.target.value); setNameErr(''); }}
+                          placeholder="Full name"
+                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+                        {nameErr && <p className="text-xs text-red-500 mt-0.5">{nameErr}</p>}
+                      </div>
+                      <div className="w-32">
+                        <input value={newDt} onChange={e => setNewDt(e.target.value)}
+                          placeholder="DT#"
+                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-400" />
+                      </div>
+                      <button onClick={addResource}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition-colors">
+                        + Add
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Delete existing resource */}
+                  <div className="border border-dashed border-red-200 rounded-xl p-4 bg-red-50/40">
+                    <p className="text-xs font-bold text-red-500 uppercase mb-1">Delete Existing Resource</p>
+                    <p className="text-xs text-gray-400 mb-3">Use this when a person leaves the roster or the company.</p>
+                    <div className="flex gap-2 flex-wrap items-start">
+                      <div className="flex-1 min-w-[220px]">
+                        <select
+                          value={delName}
+                          onChange={e => setDelName(e.target.value)}
+                          className="w-full px-3 py-2 border border-red-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-red-400 text-gray-700">
+                          <option value="">— Select Resource to Remove —</option>
+                          {resList.map(r => (
+                            <option key={r.name} value={r.name}>{r.name}{r.dt ? ` (${r.dt})` : ''}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <button
+                        disabled={!delName}
+                        onClick={() => { if (delName) { removeResource(delName); setDelName(''); } }}
+                        className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold transition-colors
+                          ${delName
+                            ? 'bg-red-600 hover:bg-red-700 text-white'
+                            : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                        Delete
+                      </button>
+                    </div>
+                    {delName && (
+                      <p className="text-xs text-red-500 mt-2 font-medium">
+                        ⚠ This will also remove <span className="font-bold">{delName}</span> from all rotation groups.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {tab === 'groups' && (
+                <div className="space-y-4">
+                  <p className="text-xs text-gray-400">Members in the same group cannot share the same oncall date.</p>
+                  {rotList.map((group, gi) => {
+                    const available = resList.filter(r => !group.members.includes(r.name));
+                    return (
+                      <div key={gi} className="border border-gray-200 rounded-xl p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <input
+                            value={group.label}
+                            onChange={e => setGroupLabel(gi, e.target.value)}
+                            className="text-sm font-bold text-gray-700 bg-transparent border-b border-dashed border-gray-300 focus:outline-none focus:border-blue-400 px-1 py-0.5 w-40"
+                          />
+                          <button onClick={() => removeGroup(gi)}
+                            className="text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded-lg transition-colors">
+                            Remove group
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-2 mb-3 min-h-[32px]">
+                          {group.members.length === 0 && <span className="text-xs text-gray-300 italic">No members yet</span>}
+                          {group.members.map(name => (
+                            <span key={name} className="inline-flex items-center gap-1.5 bg-blue-50 border border-blue-200 text-blue-700 text-xs font-medium px-2.5 py-1 rounded-lg">
+                              {name}
+                              <button onClick={() => removeMember(gi, name)}
+                                className="text-blue-300 hover:text-red-400 transition-colors">
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                        {available.length > 0 && (
+                          <select defaultValue=""
+                            onChange={e => { addMember(gi, e.target.value); e.target.value = ''; }}
+                            className="text-xs px-2.5 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-400">
+                            <option value="">+ Add member...</option>
+                            {available.map(r => <option key={r.name} value={r.name}>{r.name}</option>)}
+                          </select>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <button onClick={addGroup}
+                    className="w-full py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm font-semibold text-gray-400 hover:border-blue-300 hover:text-blue-500 transition-colors">
+                    + Add New Group
+                  </button>
+                </div>
+              )}
+
+              {tab === 'cutoff' && (
+                <div className="space-y-5">
+                  <div className="border border-red-200 bg-red-50 rounded-xl p-5">
+                    <div className="flex items-center gap-2 mb-1">
+                      <svg className="w-4 h-4 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                      </svg>
+                      <p className="text-sm font-bold text-red-700">Monthly Cutoff Day</p>
+                    </div>
+                    <p className="text-xs text-red-400 mb-4">After this day of each month, the Add Entries form will be locked and no new entries can be submitted.</p>
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2 border border-red-200 bg-white rounded-lg px-3 py-2.5 w-36">
+                        <input
+                          type="number" min="1" max="28" step="1"
+                          value={cutoffInput}
+                          onChange={e => { setCutoffInput(e.target.value); setCutoffErr(''); }}
+                          className="w-16 text-sm font-bold text-gray-800 focus:outline-none"
+                        />
+                        <span className="text-sm text-gray-400">of month</span>
+                      </div>
+                      {cutoffInput && !isNaN(parseInt(cutoffInput)) && (
+                        <span className="text-xs text-red-600 font-medium">
+                          Locks on the {parseInt(cutoffInput)}{[,'st','nd','rd'][parseInt(cutoffInput)] || 'th'} of every month
+                        </span>
+                      )}
+                    </div>
+                    {cutoffErr && <p className="text-xs text-red-500 mt-2">{cutoffErr}</p>}
+                  </div>
+                </div>
+              )}
+
+              {tab === 'general' && (
+                <div className="space-y-5">
+                  <div className="border border-gray-200 rounded-xl p-5">
+                    <p className="text-sm font-bold text-gray-700 mb-1">Daily Oncall Amount (₹)</p>
+                    <p className="text-xs text-gray-400 mb-4">This rate applies to all new entries. Existing entries are not affected.</p>
+                    <div className="flex items-center gap-3">
+                      <div className="relative w-48">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-semibold text-sm">₹</span>
+                        <input
+                          type="number" min="1" step="1"
+                          value={amtInput}
+                          onChange={e => { setAmtInput(e.target.value); setAmtErr(''); }}
+                          className="w-full pl-7 pr-3 py-2.5 border border-gray-200 rounded-lg text-sm font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        />
+                      </div>
+                      <span className="text-sm text-gray-400">per day</span>
+                    </div>
+                    {amtErr && <p className="text-xs text-red-500 mt-2">{amtErr}</p>}
+                    {amtInput && !isNaN(parseFloat(amtInput)) && parseFloat(amtInput) !== amountPerDay && (
+                      <p className="text-xs text-amber-600 mt-2 font-medium">
+                        Current: ₹{amountPerDay}/day → New: ₹{parseFloat(amtInput)}/day
+                      </p>
+                    )}
+                  </div>
+
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 bg-gray-50 rounded-b-2xl">
+              <p className="text-xs text-gray-400">Changes take effect immediately after saving</p>
+              <div className="flex gap-2">
+                <button onClick={onClose}
+                  className="px-4 py-2 border border-gray-200 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors">
+                  Cancel
+                </button>
+                <button onClick={save}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition-colors shadow-sm">
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    /* ═══════════════════════════════════════════
+       ENTRY FORM
+    ═══════════════════════════════════════════ */
+    const BLANK = { type: 'Oncall/Maintenance', resourceName: '', dtNumber: '' };
+
+    const EntryForm = ({ onAdd, allEntries, resources, rotationGroups, amountPerDay, isLocked, cutoffDay }) => {
+      const [f, setF]           = useState({ ...BLANK });
+      const [errs, setErrs]     = useState({});
+      const [selected, setSel]  = useState(new Set());
+      const [weekStart, setWS]  = useState(() => getMondayOf(new Date()));
+      const [rangeFrom, setRF]  = useState('');
+      const [rangeTo,   setRT]  = useState('');
+      const nameRef             = useRef();
+      const resDt = Object.fromEntries(resources.map(r => [r.name, r.dt]));
+
+      const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+      const toggleDate = (ds) => setSel(prev => {
+        const next = new Set(prev);
+        next.has(ds) ? next.delete(ds) : next.add(ds);
+        return next;
+      });
+
+      /* Add all dates from rangeFrom to rangeTo inclusive */
+      const applyRange = () => {
+        if (!rangeFrom || !rangeTo) return;
+        const start = new Date(rangeFrom + 'T00:00:00');
+        const end   = new Date(rangeTo   + 'T00:00:00');
+        if (end < start) return;
+        setSel(prev => {
+          const next = new Set(prev);
+          const d = new Date(start);
+          while (d <= end) { const ds = toStr(d); if (isAllowed(ds)) next.add(ds); d.setDate(d.getDate() + 1); }
+          return next;
+        });
+        /* Jump week view to the start of the range */
+        setWS(getMondayOf(start));
+        setRF(''); setRT('');
+      };
+
+      const prevWeek = () => setWS(w => { const d = new Date(w); d.setDate(d.getDate() - 7); return d; });
+      const nextWeek = () => setWS(w => { const d = new Date(w); d.setDate(d.getDate() + 7); return d; });
+
+      const validate = () => {
+        const e = {};
+        if (!f.resourceName) e.resourceName = 'Required';
+        if (selected.size === 0) e.dates = 'Select at least one date';
+
+        /* Rotation conflict check */
+        if (f.resourceName && selected.size > 0) {
+          const group = rotationGroups.find(g => g.members.includes(f.resourceName));
+          if (group) {
+            const peers = group.members.filter(n => n !== f.resourceName);
+            const conflicts = [];
+            allEntries.forEach(en => {
+              if (peers.includes(en.resourceName) && selected.has(en.date)) {
+                conflicts.push({ date: fmtDate(en.date), peer: en.resourceName });
+              }
+            });
+            if (conflicts.length) {
+              const info = [...new Map(conflicts.map(c => [c.date, c])).values()]
+                .map(c => `${c.date} (${c.peer.split(' ')[0]})`)
+                .join(', ');
+              e.dates = `Rotation conflict — these dates already assigned to a group member: ${info}`;
+            }
+          }
+        }
+
+        setErrs(e);
+        return !Object.keys(e).length;
+      };
+
+      const submit = (e) => {
+        e.preventDefault();
+        if (!validate()) return;
+        const newEntries = [...selected].sort().map(date => ({
+          id: uid(),
+          date,
+          type: f.type,
+          resourceName: f.resourceName.trim(),
+          dtNumber: f.dtNumber.trim(),
+          amount: amountPerDay,
+          total: amountPerDay,
+          createdAt: new Date().toISOString(),
+        }));
+        onAdd(newEntries);
+        setSel(new Set());
+        setF(p => ({ ...p, resourceName: '', dtNumber: '' }));
+        setErrs({});
+
+        nameRef.current?.focus();
+      };
+
+      const inp = (field) =>
+        `w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors ${
+          errs[field]
+            ? 'border-red-400 bg-red-50 focus:ring-red-400'
+            : 'border-gray-200 bg-white hover:border-gray-300'
+        }`;
+
+      const totalPreview = selected.size * amountPerDay;
+      const sortedSel    = [...selected].sort();
+
+      if (isLocked) return (
+        <div className="bg-white rounded-2xl card-elevated border border-red-200 p-8 text-center bg-gradient-to-b from-white to-red-50/20">
+          <div className="w-16 h-16 bg-gradient-to-br from-red-100 to-red-50 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-sm shadow-red-100 ring-1 ring-red-100">
+            <svg className="w-8 h-8 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+          </div>
+          <h2 className="text-lg font-bold text-red-700 mb-2">Sheet Locked</h2>
+          <p className="text-sm text-gray-500 mb-1">
+            The cutoff date (<span className="font-semibold text-gray-700">{cutoffDay}th of each month</span>) has passed.
+          </p>
+          <p className="text-sm text-gray-400">No new entries can be added for this month. Contact admin to change the cutoff date in Settings.</p>
+        </div>
+      );
+
+      return (
+        <div className="bg-white rounded-2xl card-elevated border border-gray-100/80 p-6">
+          {/* Header */}
+          <div className="flex items-center justify-between mb-5">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl flex items-center justify-center shadow-sm shadow-blue-200">
+                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+              </div>
+              <h2 className="text-base font-bold text-gray-800">Add Entries</h2>
+            </div>
+            {selected.size > 0 && (
+              <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-2 text-right">
+                <p className="text-xs text-gray-400 leading-none">
+                  {selected.size} {selected.size === 1 ? 'day' : 'days'} × ₹{amountPerDay}
+                </p>
+                <p className="text-lg font-bold text-blue-700 leading-tight mt-0.5">{fmtMoney(totalPreview)}</p>
+              </div>
+            )}
+          </div>
+
+          <form onSubmit={submit}>
+            {/* Resource details row */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+              {/* Resource Name */}
+              <div className="col-span-2 sm:col-span-1">
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Resource Name *</label>
+                <select
+                  ref={nameRef}
+                  value={f.resourceName}
+                  onChange={e => {
+                    const name = e.target.value;
+                    setF(p => ({ ...p, resourceName: name, dtNumber: resDt[name] || '' }));
+                  }}
+                  className={inp('resourceName') + ' font-bold'}
+                >
+                  <option value="">— Select Resource —</option>
+                  {resources.map(r => (
+                    <option key={r.name} value={r.name} style={{fontWeight:'bold'}}>{r.name}</option>
+                  ))}
+                </select>
+                {errs.resourceName && <p className="text-xs text-red-500 mt-0.5">{errs.resourceName}</p>}
+              </div>
+
+              {/* Type — fixed value */}
+              <div>
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Type</label>
+                <div className="w-full px-3 py-2 rounded-lg border border-gray-100 bg-gray-50 text-sm text-gray-600 font-medium">
+                  Oncall/Maintenance
+                </div>
+              </div>
+
+              {/* DT# — auto-filled */}
+              <div>
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">DT#</label>
+                <div className={`w-full px-3 py-2 rounded-lg border text-sm font-mono font-bold
+                  ${f.dtNumber ? 'border-gray-200 bg-gray-50 text-gray-700' : 'border-dashed border-gray-200 bg-gray-50 text-gray-300'}`}>
+                  {f.dtNumber || 'auto-filled'}
+                </div>
+              </div>
+
+              {/* Amount */}
+              <div>
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Amount</label>
+                <div className="w-full px-3 py-2 rounded-lg border border-gray-100 bg-gray-50 text-sm font-bold text-gray-600 flex items-center justify-between">
+                  <span>₹{amountPerDay}</span>
+                  <span className="text-xs font-normal text-gray-400">/day</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Date Range Picker */}
+            <div className="mb-5 p-3 bg-slate-50 rounded-xl border border-slate-100 w-fit">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 mb-3">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                Date Range
+              </div>
+              <div className="flex flex-wrap items-end gap-3">
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">From</label>
+                  <input type="date" value={rangeFrom} max={maxAllowedDate} onChange={e => setRF(e.target.value)}
+                    className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 w-38" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">To</label>
+                  <input type="date" value={rangeTo} min={rangeFrom} max={maxAllowedDate} onChange={e => setRT(e.target.value)}
+                    className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 w-38" />
+                </div>
+                <button type="button" onClick={applyRange}
+                  disabled={!rangeFrom || !rangeTo}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold transition-colors
+                    ${rangeFrom && rangeTo
+                      ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                      : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
+                  </svg>
+                  Add All Dates
+                </button>
+                {rangeFrom && rangeTo && new Date(rangeTo) >= new Date(rangeFrom) && (
+                  <span className="text-xs text-blue-500 font-medium self-end mb-2">
+                    {Math.round((new Date(rangeTo)-new Date(rangeFrom))/(1000*60*60*24))+1} days
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex-1 h-px bg-gray-100"></div>
+              <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Select Dates</span>
+              <div className="flex-1 h-px bg-gray-100"></div>
+            </div>
+
+            {/* Week Picker */}
+            <WeekPicker
+              selected={selected}
+              onToggle={toggleDate}
+              onClearAll={() => setSel(new Set())}
+              weekStart={weekStart}
+              onPrev={prevWeek}
+              onNext={nextWeek}
+            />
+
+            {errs.dates && (
+              <p className="text-xs text-red-500 mt-2 flex items-center gap-1">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {errs.dates}
+              </p>
+            )}
+
+            {/* Selected dates preview */}
+            {sortedSel.length > 0 && (
+              <div className="mt-4 p-3 bg-blue-50 rounded-xl border border-blue-100">
+                <p className="text-xs font-semibold text-blue-600 mb-2">Selected dates:</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {sortedSel.map(ds => (
+                    <span key={ds}
+                      className="inline-flex items-center gap-1 bg-white border border-blue-200 text-blue-700 text-xs font-medium px-2.5 py-1 rounded-lg">
+                      {fmtDate(ds)}
+                      <button type="button" onClick={() => toggleDate(ds)}
+                        className="text-blue-300 hover:text-red-400 transition-colors ml-0.5">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Submit */}
+            <div className="flex items-center justify-between mt-5 pt-4 border-t border-gray-100">
+              <p className="text-sm text-gray-400">
+                {selected.size === 0
+                  ? 'Pick dates from the calendar above'
+                  : <span className="text-gray-600 font-medium">
+                      {selected.size} {selected.size === 1 ? 'entry' : 'entries'} &rarr; {fmtMoney(totalPreview)}
+                    </span>
+                }
+              </p>
+              <button
+                type="submit"
+                disabled={selected.size === 0}
+                className={`flex items-center gap-2 px-6 py-2.5 rounded-xl font-semibold text-sm transition-all shadow-sm
+                  ${selected.size > 0
+                    ? 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white'
+                    : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
+                </svg>
+                Add {selected.size > 0 ? `${selected.size} ${selected.size === 1 ? 'Entry' : 'Entries'}` : 'Entries'}
+              </button>
+            </div>
+          </form>
+        </div>
+      );
+    };
+
+    /* ═══════════════════════════════════════════
+       FILTERS
+    ═══════════════════════════════════════════ */
+    const Filters = ({ filters, onChange, resources, onClear, count, total }) => {
+      const inp = 'px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors';
+      const active = filters.fromDate || filters.toDate || filters.resource;
+      return (
+        <div className={`bg-white rounded-2xl card-elevated border p-4 transition-all ${active ? 'border-blue-300 shadow-blue-50' : 'border-gray-100/80'}`}>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex items-center gap-2 mr-1">
+              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z" />
+              </svg>
+              <span className="text-sm font-bold text-gray-700">Filter</span>
+            </div>
+            <div>
+              <label className="text-xs font-bold text-gray-600 mb-1 block">From</label>
+              <input type="date" value={filters.fromDate}
+                onChange={e => onChange('fromDate', e.target.value)} className={inp} />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-gray-600 mb-1 block">To</label>
+              <input type="date" value={filters.toDate}
+                onChange={e => onChange('toDate', e.target.value)} className={inp} />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-gray-600 mb-1 block">Resource</label>
+              <select value={filters.resource}
+                onChange={e => onChange('resource', e.target.value)} className={inp}>
+                <option value="">All Resources</option>
+                {resources.map(r => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </div>
+            {active && (
+              <button onClick={onClear}
+                className="flex items-center gap-1.5 px-3 py-2 border border-red-200 text-red-500 hover:bg-red-50 rounded-lg text-sm font-medium transition-colors">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Clear
+              </button>
+            )}
+            {active && (
+              <div className="ml-auto text-right">
+                <p className="text-xs text-gray-400">{count} result{count !== 1 ? 's' : ''}</p>
+                <p className="text-sm font-bold text-blue-700">{fmtMoney(total)}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    /* ═══════════════════════════════════════════
+       ENTRIES TABLE  (grouped by resource)
+    ═══════════════════════════════════════════ */
+    const EntriesTable = ({ filtered, allEntries, onDelete, onDeleteAll, onExport }) => {
+      /* running monthly total (across ALL entries) per row */
+      const enriched = useMemo(() => {
+        const sorted = [...allEntries].sort((a, b) =>
+          a.date !== b.date ? a.date.localeCompare(b.date) : a.createdAt.localeCompare(b.createdAt)
+        );
+        const running = {};
+        sorted.forEach(e => {
+          const mk = monthKey(e.date);
+          running[e.id] = (running[mk] || 0) + e.total;
+          running[mk]   = running[e.id];
+        });
+        return filtered.map(e => ({ ...e, monthRunning: running[e.id] || e.total }));
+      }, [filtered, allEntries]);
+
+      /* group by resource, each group sorted by date asc */
+      const grouped = useMemo(() => {
+        const map = {};
+        enriched.forEach(e => {
+          if (!map[e.resourceName]) map[e.resourceName] = [];
+          map[e.resourceName].push(e);
+        });
+        return Object.entries(map)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, rows]) => ({
+            name,
+            rows: rows.sort((a, b) =>
+              a.date !== b.date ? a.date.localeCompare(b.date) : a.createdAt.localeCompare(b.createdAt)
+            ),
+            totalAmount: rows.reduce((s, e) => s + e.total, 0),
+          }));
+      }, [enriched]);
+
+      if (!enriched.length) return (
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-16 text-center">
+          <svg className="w-14 h-14 text-gray-200 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1}
+              d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+          </svg>
+          <p className="text-gray-400 text-sm font-medium">No entries yet</p>
+          <p className="text-gray-300 text-xs mt-1">Fill in the form above and select dates to add entries.</p>
+        </div>
+      );
+
+      const sumTotal = enriched.reduce((s, e) => s + e.total, 0);
+      let rowNum = 0;
+
+      return (
+        <div className="bg-white rounded-2xl card-elevated border border-gray-100/80 overflow-hidden">
+          <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100">
+            <div className="w-9 h-9 bg-gradient-to-br from-slate-600 to-slate-800 rounded-xl flex items-center justify-center shadow-sm">
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-gray-800">Entries</h2>
+              <p className="text-xs text-gray-400">
+                {enriched.length} record{enriched.length !== 1 ? 's' : ''} &middot; {grouped.length} resource{grouped.length !== 1 ? 's' : ''}
+              </p>
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              <button onClick={() => onExport('csv')}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold transition-colors shadow-sm">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                CSV
+              </button>
+              <button onClick={() => onExport('xlsx')}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold transition-colors shadow-sm">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Excel
+              </button>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[700px]">
+              <thead>
+                <tr className="bg-slate-50/80 text-left border-b border-slate-100">
+                  <th className="px-4 py-3 text-xs font-bold text-gray-400 uppercase w-10">#</th>
+                  <th className="px-4 py-3 text-xs font-bold text-gray-400 uppercase">Date</th>
+                  <th className="px-4 py-3 text-xs font-bold text-gray-400 uppercase">Type</th>
+                  <th className="px-4 py-3 text-xs font-bold text-gray-400 uppercase">Resource Name</th>
+                  <th className="px-4 py-3 text-xs font-bold text-gray-400 uppercase">DT#</th>
+                  <th className="px-4 py-3 text-xs font-bold text-gray-400 uppercase text-right">Amount</th>
+                  <th className="px-4 py-3 w-10"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {grouped.map(({ name, rows, totalAmount }, gIdx) => {
+                const ROW_COLORS = [
+                  { row: 'bg-indigo-100 border-indigo-300',  text: 'text-indigo-800',  sub: 'text-indigo-600',  badge: 'bg-indigo-600' },
+                  { row: 'bg-emerald-100 border-emerald-300', text: 'text-emerald-800', sub: 'text-emerald-600', badge: 'bg-emerald-700' },
+                  { row: 'bg-amber-100 border-amber-300',    text: 'text-amber-800',   sub: 'text-amber-600',   badge: 'bg-amber-600'  },
+                  { row: 'bg-rose-100 border-rose-300',      text: 'text-rose-800',    sub: 'text-rose-600',    badge: 'bg-rose-600'   },
+                  { row: 'bg-cyan-100 border-cyan-300',      text: 'text-cyan-800',    sub: 'text-cyan-600',    badge: 'bg-cyan-700'   },
+                  { row: 'bg-violet-100 border-violet-300',  text: 'text-violet-800',  sub: 'text-violet-600',  badge: 'bg-violet-600' },
+                ];
+                const c = ROW_COLORS[gIdx % ROW_COLORS.length];
+                return (
+                  <React.Fragment key={name}>
+                    {rows.map((entry) => {
+                      rowNum++;
+                      const n = rowNum;
+                      return (
+                        <tr key={entry.id}
+                          className={`border-t border-gray-50 hover:bg-slate-50 transition-colors group
+                            ${isArrears(entry.date) ? 'bg-red-50/40' : ''}`}>
+                          <td className="px-4 py-3 text-gray-300 text-xs font-mono">{n}</td>
+                          <td className="px-4 py-3 font-medium whitespace-nowrap">
+                            <span className={isArrears(entry.date) ? 'text-red-600' : 'text-gray-700'}>
+                              {fmtDate(entry.date)}
+                            </span>
+                            {isArrears(entry.date) && (
+                              <span className="ml-2 text-xs bg-red-100 text-red-600 border border-red-200 px-1.5 py-0.5 rounded font-semibold">
+                                ARREARS
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3"><Badge type={entry.type} /></td>
+                          <td className="px-4 py-3 font-semibold text-gray-800">{entry.resourceName}</td>
+                          <td className="px-4 py-3 text-gray-700 font-mono text-sm font-bold">{entry.dtNumber}</td>
+                          <td className="px-4 py-3 text-right font-bold text-blue-700">{fmtMoney(entry.amount)}</td>
+                          <td className="px-4 py-3">
+                            <button onClick={() => onDelete(entry.id)}
+                              className="text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all p-1 rounded-lg"
+                              title="Delete entry">
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {/* ── Resource subtotal ── */}
+                    <tr className={`border-t-2 ${c.row}`}>
+                      <td className={`px-4 py-2.5 ${c.sub}`}>
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                        </svg>
+                      </td>
+                      <td colSpan={4} className="px-4 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold uppercase tracking-wide ${c.text}`}>{name}</span>
+                          <span className={`text-xs ${c.sub}`}>—</span>
+                          <span className={`text-xs font-medium ${c.sub}`}>
+                            Total &middot; {rows.length} {rows.length === 1 ? 'day' : 'days'}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <span className={`inline-flex items-center ${c.badge} text-white text-sm font-bold px-3 py-1 rounded-lg shadow-sm`}>
+                          {fmtMoney(totalAmount)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <button onClick={() => onDeleteAll(rows.map(r => r.id))}
+                          className="flex items-center gap-1 px-2 py-1 bg-red-50 hover:bg-red-100 border border-red-200 text-red-500 hover:text-red-700 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap"
+                          title={`Delete all entries for ${name}`}>
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                          Delete All
+                        </button>
+                      </td>
+                    </tr>
+                  </React.Fragment>
+                );
+              })}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-slate-700 bg-gradient-to-r from-slate-950 to-slate-800">
+                  <td colSpan={6} className="px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-widest">
+                    Grand Total &middot; {enriched.length} entries &middot; {grouped.length} resources
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <span className="text-base font-bold text-emerald-400 drop-shadow">{fmtMoney(sumTotal)}</span>
+                  </td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      );
+    };
+
+    /* ═══════════════════════════════════════════
+       MONTHLY SUMMARY
+    ═══════════════════════════════════════════ */
+    const MonthlySummary = ({ entries }) => {
+      const data = useMemo(() => {
+        const map = {};
+        entries.forEach(e => {
+          const mk = monthKey(e.date);
+          if (!mk) return;
+          if (!map[mk]) map[mk] = { mk, count: 0, total: 0, res: new Set() };
+          map[mk].count++;
+          map[mk].total += e.total;
+          map[mk].res.add(e.resourceName);
+        });
+        return Object.values(map)
+          .map(v => ({ ...v, res: v.res.size }))
+          .sort((a, b) => b.mk.localeCompare(a.mk));
+      }, [entries]);
+
+      if (!data.length) return null;
+
+      const maxTotal   = Math.max(...data.map(d => d.total));
+      const chartData  = [...data].reverse().slice(-12);
+
+      return (
+        <div className="bg-white rounded-2xl card-elevated border border-gray-100/80 p-6">
+          <div className="flex items-center gap-3 mb-5">
+            <div className="w-9 h-9 bg-gradient-to-br from-emerald-500 to-emerald-700 rounded-xl flex items-center justify-center shadow-sm shadow-emerald-200">
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-gray-800">Monthly Summary</h2>
+              <p className="text-xs text-gray-400">{data.length} month{data.length !== 1 ? 's' : ''} of data</p>
+            </div>
+          </div>
+
+          {/* Bar chart */}
+          <div className="mb-6 space-y-2">
+            {chartData.map(({ mk, total, count }) => (
+              <div key={mk} className="flex items-center gap-3">
+                <span className="text-xs text-gray-500 w-16 shrink-0 text-right font-mono">{monthShort(mk)}</span>
+                <div className="flex-1 bg-slate-100 rounded-full h-7 overflow-hidden shadow-inner">
+                  {total > 0 && (
+                    <div className="stat-bar-fill h-full rounded-full flex items-center justify-end pr-3"
+                      style={{ width: `${Math.max(4, (total / maxTotal) * 100)}%`, background: 'linear-gradient(90deg,#6366f1,#3b82f6,#1d4ed8)', boxShadow: '0 1px 6px rgba(59,130,246,0.4)' }}>
+                      <span className="text-white font-semibold drop-shadow-sm" style={{ fontSize: '10px' }}>{fmtMoney(total)}</span>
+                    </div>
+                  )}
+                </div>
+                <div className="flex gap-1 shrink-0 w-16">
+                  {count > 0 && <span className="text-xs bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-medium">{count}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Summary table */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50">
+                  <th className="text-left px-3 py-2 text-xs font-bold text-gray-400 uppercase rounded-l-xl">Month</th>
+                  <th className="text-center px-3 py-2 text-xs font-bold text-gray-400 uppercase">Entries</th>
+                  <th className="text-center px-3 py-2 text-xs font-bold text-gray-400 uppercase">Resources</th>
+                  <th className="text-center px-3 py-2 text-xs font-bold text-gray-400 uppercase">Oncall/Maintenance</th>
+                  <th className="text-right px-3 py-2 text-xs font-bold text-gray-400 uppercase rounded-r-xl">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.map(({ mk, count, res, total }) => (
+                  <tr key={mk} className="border-t border-gray-50 hover:bg-gray-50 transition-colors">
+                    <td className="px-3 py-2.5 font-semibold text-gray-800">{monthLabel(mk)}</td>
+                    <td className="px-3 py-2.5 text-center text-gray-600">{count}</td>
+                    <td className="px-3 py-2.5 text-center text-gray-600">{res}</td>
+                    <td className="px-3 py-2.5 text-center">
+                      <span className="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full font-medium">{count}</span>
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-bold text-emerald-600">{fmtMoney(total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-gray-200 bg-gray-50">
+                  <td className="px-3 py-2.5 text-xs font-bold text-gray-500 uppercase">Grand Total</td>
+                  <td className="px-3 py-2.5 text-center font-bold text-gray-700">{entries.length}</td>
+                  <td colSpan={2}></td>
+                  <td className="px-3 py-2.5 text-right font-bold text-emerald-700 text-base">
+                    {fmtMoney(entries.reduce((s,e) => s+e.total, 0))}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      );
+    };
+
+    /* ═══════════════════════════════════════════
+       APP
+    ═══════════════════════════════════════════ */
+    const App = () => {
+      const [entries, setEntries] = useState(load);
+      const [filters, setFilters] = useState({ fromDate: '', toDate: '', resource: '' });
+      const [toast,   setToast]   = useState(null);
+      const [resources,    setResources]    = useState(() => {
+        try { const s = localStorage.getItem(RES_STORAGE_KEY); return s ? JSON.parse(s) : DEFAULT_RESOURCES; } catch { return DEFAULT_RESOURCES; }
+      });
+      const [rotGroups,    setRotGroups]    = useState(() => {
+        try {
+          const s = localStorage.getItem(ROT_STORAGE_KEY);
+          if (!s) return DEFAULT_ROTATION_GROUPS;
+          const parsed = JSON.parse(s);
+          /* Migrate old format (string[][]) → { label, members }[] */
+          if (Array.isArray(parsed) && parsed.length > 0 && Array.isArray(parsed[0])) {
+            return parsed.map((members, i) => ({ label: `Group ${i+1}`, members }));
+          }
+          return parsed;
+        } catch { return DEFAULT_ROTATION_GROUPS; }
+      });
+      const [amountPerDay, setAmountPerDay] = useState(() => {
+        try { const s = localStorage.getItem(AMT_STORAGE_KEY); return s ? JSON.parse(s) : DEFAULT_AMOUNT; } catch { return DEFAULT_AMOUNT; }
+      });
+      const [cutoffDay, setCutoffDay] = useState(() => {
+        try { const s = localStorage.getItem(CUTOFF_STORAGE_KEY); return s ? JSON.parse(s) : DEFAULT_CUTOFF_DAY; } catch { return DEFAULT_CUTOFF_DAY; }
+      });
+      const [showSettings, setShowSettings] = useState(false);
+
+      useEffect(() => { save(entries); }, [entries]);
+      useEffect(() => { localStorage.setItem(RES_STORAGE_KEY, JSON.stringify(resources)); }, [resources]);
+      useEffect(() => { localStorage.setItem(ROT_STORAGE_KEY, JSON.stringify(rotGroups)); }, [rotGroups]);
+      useEffect(() => { localStorage.setItem(AMT_STORAGE_KEY, JSON.stringify(amountPerDay)); }, [amountPerDay]);
+      useEffect(() => { localStorage.setItem(CUTOFF_STORAGE_KEY, JSON.stringify(cutoffDay)); }, [cutoffDay]);
+
+      const showToast = (msg, type = 'success') => {
+        setToast({ msg, type });
+        setTimeout(() => setToast(null), 3000);
+      };
+
+      /* For filters: preset list + any extra names from entries */
+      const filterResNames = useMemo(() => {
+        const preset = resources.map(r => r.name);
+        const extra  = entries.map(e => e.resourceName).filter(n => !preset.includes(n));
+        return [...preset, ...[...new Set(extra)].sort()];
+      }, [entries, resources]);
+
+      const filtered = useMemo(() =>
+        entries.filter(e => {
+          if (filters.fromDate && e.date < filters.fromDate) return false;
+          if (filters.toDate   && e.date > filters.toDate)   return false;
+          if (filters.resource && e.resourceName !== filters.resource) return false;
+          return true;
+        }),
+      [entries, filters]);
+
+      const handleAdd = (newEntries) => {
+        setEntries(p => [...p, ...newEntries]);
+        showToast(`${newEntries.length} ${newEntries.length === 1 ? 'entry' : 'entries'} added — ${fmtMoney(newEntries.reduce((s,e)=>s+e.total,0))}`);
+      };
+
+      const handleDelete = (id) => {
+        if (!window.confirm('Delete this entry?')) return;
+        setEntries(p => p.filter(e => e.id !== id));
+        showToast('Entry deleted', 'info');
+      };
+
+      const handleDeleteAll = (ids) => {
+        const res = entries.find(e => e.id === ids[0])?.resourceName || '';
+        if (!window.confirm(`Delete all ${ids.length} entries for ${res}?`)) return;
+        setEntries(p => p.filter(e => !ids.includes(e.id)));
+        showToast(`${ids.length} entries deleted`, 'info');
+      };
+
+      const handleExport = (fmt) => {
+        if (!filtered.length) { showToast('No entries to export', 'info'); return; }
+
+        /* Group entries by resource, keep insertion order from RESOURCES list */
+        const byRes = {};
+        filtered.forEach(e => {
+          if (!byRes[e.resourceName]) byRes[e.resourceName] = [];
+          byRes[e.resourceName].push(e);
+        });
+        /* Sort groups by RESOURCES order, then any extras alphabetically */
+        const resOrder = resources.map(r => r.name);
+        const sortedGroups = [
+          ...resOrder.filter(n => byRes[n]),
+          ...Object.keys(byRes).filter(n => !resOrder.includes(n)).sort(),
+        ].map(n => ({ name: n, rows: byRes[n].sort((a,b) => a.date.localeCompare(b.date)) }));
+
+        const _now = new Date();
+        const _mon = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][_now.getMonth()];
+        const _yr  = _now.getFullYear();
+        const filename = `ES_Weekend_ONCALL_Allowance_${_mon}_${_yr}`;
+
+        if (fmt === 'csv') {
+          /* CSV: flat format matching columns A-G */
+          const lines = [['Date','Oncall/Maintenance','Resource Name','DT#','Amount','TOTAL','Remarks'].join(',')];
+          lines.push('');
+          sortedGroups.forEach(({ name, rows }) => {
+            rows.forEach(e => lines.push([fmtDate(e.date),'Oncall/Maintenance',e.resourceName,e.dtNumber,e.amount,'', isArrears(e.date)?'ARREARS':''].join(',')));
+            lines.push(['','','','','', rows.reduce((s,e)=>s+e.total,0),''].join(','));
+            lines.push('');
+          });
+          const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+          const url  = URL.createObjectURL(blob);
+          const a    = document.createElement('a');
+          a.href = url; a.download = filename+'.csv'; a.click();
+          URL.revokeObjectURL(url);
+          showToast('CSV downloaded');
+
+        } else {
+          /* ── Build sheet row by row (array-of-arrays) to match exact Excel format ── */
+          /* Columns: A=Date  B=Oncall/Maintenance  C=Resource Name  D=DT#  E=Amount  F=TOTAL */
+          const aoa = [];
+
+          /* Row 1: Header */
+          aoa.push(['Date','Oncall/Maintenance','Resource Name','DT#','Amount','TOTAL']);
+          /* Row 2: empty */
+          aoa.push(['','','','','','']);
+
+          /* Track which Excel rows hold TOTAL values and which are arrears */
+          const totalRows   = [];
+          const arrearsRows = [];
+
+          sortedGroups.forEach(({ name, rows }) => {
+            rows.forEach(e => {
+              if (isArrears(e.date)) arrearsRows.push(aoa.length + 1);
+              aoa.push([fmtDate(e.date), 'Oncall/Maintenance', e.resourceName, e.dtNumber, e.amount, '']);
+            });
+            /* TOTAL row — only column G (index 6) */
+            const tot = rows.reduce((s,e) => s+e.total, 0);
+            totalRows.push(aoa.length + 1); /* 1-based Excel row */
+            aoa.push(['','','','','', tot]);
+            /* blank separator */
+            aoa.push(['','','','','','']);
+          });
+
+          const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+          /* Column widths: A=12 B=22 C=26 D=12 E=10 F=12 */
+          ws['!cols'] = [12,22,26,12,10,12].map(w => ({ wch: w }));
+
+          /* ── Cell styles ── */
+          const GREEN  = '00B050';
+          const WHITE  = 'FFFFFF';
+          const BLACK  = '000000';
+
+          /* Header row — green background, white bold text */
+          ['A','B','C','D','E','F'].forEach(col => {
+            const addr = `${col}1`;
+            if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+            ws[addr].s = {
+              fill: { patternType: 'solid', fgColor: { rgb: GREEN } },
+              font: { bold: true, color: { rgb: WHITE }, name: 'Calibri', sz: 13 },
+              alignment: { horizontal: 'center', vertical: 'center' },
+              border: { bottom: { style: 'thin', color: { rgb: '006400' } } },
+            };
+          });
+
+          /* TOTAL rows — bold + larger font on all cols A-F */
+          totalRows.forEach(r => {
+            ['A','B','C','D','E','F'].forEach(col => {
+              const addr = `${col}${r}`;
+              if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+              ws[addr].s = {
+                font: { bold: true, name: 'Calibri', sz: 11 },
+                alignment: col === 'F' ? { horizontal: 'right' } : undefined,
+              };
+            });
+          });
+
+          /* ARREARS rows — red font on all columns A-F */
+          const RED = 'FF0000';
+          arrearsRows.forEach(r => {
+            ['A','B','C','D','E','F'].forEach(col => {
+              const addr = `${col}${r}`;
+              if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+              ws[addr].s = {
+                font: { color: { rgb: RED }, name: 'Calibri' },
+              };
+            });
+          });
+
+          /* Row height for header */
+          ws['!rows'] = [{ hpt: 26 }];
+
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+
+          XLSX.writeFile(wb, filename+'.xlsx');
+          showToast('Excel exported — matching your format!');
+        }
+      };
+
+      const filtTotal  = filtered.reduce((s,e)=>s+e.total,0);
+      const isLocked   = new Date().getDate() >= cutoffDay;
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-100 via-blue-50/30 to-indigo-50/20">
+
+          {/* ── Header ── */}
+          <header className="bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 header-glow sticky top-0 z-20 border-b border-blue-500/20">
+            <div className="max-w-7xl mx-auto px-6 py-4 flex items-center gap-4">
+              <div className="w-11 h-11 bg-gradient-to-br from-blue-400 to-blue-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/30 shrink-0 ring-1 ring-blue-300/20">
+                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                    d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4M4 12c0 2.21 3.582 4 8 4s8-1.79 8-4" />
+                </svg>
+              </div>
+              <div>
+                <h1 className="text-white text-xl font-bold tracking-tight">DBA OnCall Tracker</h1>
+                <p className="text-blue-300/60 text-xs tracking-wide">Database Administration Team · Oncall &amp; Maintenance Log</p>
+              </div>
+              <button onClick={() => setShowSettings(true)}
+                className="ml-auto flex items-center gap-2 px-4 py-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-600/80 hover:border-slate-500 text-slate-200 rounded-xl text-sm font-semibold transition-all">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Settings
+              </button>
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-5">
+
+            {/* Form */}
+            <EntryForm onAdd={handleAdd} allEntries={entries} resources={resources} rotationGroups={rotGroups} amountPerDay={amountPerDay} isLocked={isLocked} cutoffDay={cutoffDay} />
+
+            {/* Table */}
+            <EntriesTable filtered={filtered} allEntries={entries} onDelete={handleDelete} onDeleteAll={handleDeleteAll} onExport={handleExport} />
+
+            {/* Monthly Summary */}
+            <MonthlySummary entries={entries} />
+
+            {/* Filters */}
+            <Filters
+              filters={filters}
+              onChange={(k,v) => setFilters(p => ({ ...p, [k]: v }))}
+              resources={filterResNames}
+              onClear={() => setFilters({ fromDate:'', toDate:'', resource:'' })}
+              count={filtered.length}
+              total={filtTotal}
+            />
+
+            {/* Footer */}
+            <div className="text-center pb-8 space-y-1">
+              <p className="text-sm font-bold text-red-500">
+                Data saved in browser local storage.
+                <span className="text-red-600"> Export to Excel regularly</span> for audit backup.
+              </p>
+              <p className="text-xs text-gray-300">DBA OnCall Tracker · {new Date().getFullYear()}</p>
+            </div>
+          </main>
+
+          {/* Settings Modal */}
+          {showSettings && (
+            <SettingsModal
+              resources={resources}
+              rotGroups={rotGroups}
+              amountPerDay={amountPerDay}
+              cutoffDay={cutoffDay}
+              onSaveResources={r => { setResources(r); showToast('Resources saved'); }}
+              onSaveRotGroups={g => { setRotGroups(g); showToast('Rotation groups saved'); }}
+              onSaveAmount={a => { setAmountPerDay(a); showToast(`Amount updated to ₹${a}/day`); }}
+              onSaveCutoff={d => { setCutoffDay(d); showToast(`Cutoff set to ${d}th of each month`); }}
+              onClose={() => setShowSettings(false)}
+            />
+          )}
+
+          {/* Toast */}
+          {toast && (
+            <div className={`toast fixed bottom-6 right-6 z-50 px-5 py-3 rounded-2xl shadow-2xl text-sm font-semibold flex items-center gap-2.5 ring-1 ring-white/10
+              ${toast.type === 'success' ? 'bg-gradient-to-r from-emerald-600 to-emerald-500 text-white' : 'bg-gradient-to-r from-slate-800 to-slate-700 text-white'}`}>
+              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
+                  d={toast.type==='success' ? 'M5 13l4 4L19 7' : 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z'} />
+              </svg>
+              {toast.msg}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
