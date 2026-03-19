@@ -9,16 +9,24 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
-    body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    body { font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: #f1f5f9; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 10px; }
+    ::-webkit-scrollbar-thumb { background: linear-gradient(180deg,#94a3b8,#cbd5e1); border-radius: 10px; }
+    ::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg,#64748b,#94a3b8); }
     @keyframes slideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     .toast { animation: slideUp 0.2s ease; }
     .day-btn { transition: all 0.15s ease; }
+    .day-btn:not(:disabled):not(.selected):hover { transform: translateY(-1px); }
     input[type="date"]::-webkit-datetime-edit { text-transform: uppercase; }
     input[type="date"]::-webkit-datetime-edit-fields-wrapper { text-transform: uppercase; }
+    .header-glow { box-shadow: 0 4px 24px -4px rgba(59,130,246,0.15), 0 2px 8px -2px rgba(0,0,0,0.3); }
+    .card-elevated { box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.05); }
+    .stat-bar-fill { transition: width 0.6s cubic-bezier(0.4,0,0.2,1); }
   </style>
 </head>
 <body class="bg-slate-100 min-h-screen">
@@ -140,10 +148,10 @@
        BADGE
     ═══════════════════════════════════════════ */
     const Badge = ({ type }) => (
-      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap
+      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap tracking-wide
         ${type === 'Oncall'
-          ? 'bg-blue-100 text-blue-700 border border-blue-200'
-          : 'bg-amber-100 text-amber-700 border border-amber-200'}`}>
+          ? 'bg-blue-600 text-white shadow-sm shadow-blue-200/60'
+          : 'bg-amber-500 text-white shadow-sm shadow-amber-200/60'}`}>
         {type}
       </span>
     );
@@ -152,7 +160,7 @@
        STAT CARD
     ═══════════════════════════════════════════ */
     const StatCard = ({ label, value, sub, accent }) => (
-      <div className={`bg-white rounded-2xl p-5 shadow-sm border-t-4 ${accent} hover:shadow-md transition-shadow`}>
+      <div className={`bg-white rounded-2xl p-5 card-elevated border-t-4 ${accent} hover:shadow-md transition-all hover:-translate-y-0.5`}>
         <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">{label}</p>
         <p className="text-2xl font-bold text-gray-800">{value}</p>
         {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
@@ -263,7 +271,6 @@
       const [newDt,   setNewDt]   = useState('');
       const [nameErr, setNameErr] = useState('');
       const [delName, setDelName] = useState('');
-      const [delErr,  setDelErr]  = useState('');
       const [amtInput,    setAmtInput]    = useState(String(amountPerDay));
       const [amtErr,      setAmtErr]      = useState('');
       const [cutoffInput, setCutoffInput] = useState(String(cutoffDay));
@@ -294,7 +301,7 @@
         if (isNaN(parsedAmt) || parsedAmt <= 0) { setAmtErr('Enter a valid amount greater than 0'); setTab('general'); return; }
         if (isNaN(parsedCutoff) || parsedCutoff < 1 || parsedCutoff > 28) { setCutoffErr('Enter a day between 1 and 28'); setTab('general'); return; }
         onSaveResources(resList);
-        onSaveRotGroups(rotList.filter(g => g.label.trim()));
+        onSaveRotGroups(rotList.filter(g => g.members.length > 0));
         onSaveAmount(parsedAmt);
         onSaveCutoff(parsedCutoff);
         onClose();
@@ -302,10 +309,10 @@
 
       return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+          <div className="bg-white rounded-2xl shadow-2xl ring-1 ring-black/5 w-full max-w-2xl max-h-[90vh] flex flex-col">
             {/* Header */}
             <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100">
-              <div className="w-9 h-9 bg-slate-700 rounded-xl flex items-center justify-center">
+              <div className="w-9 h-9 bg-gradient-to-br from-slate-600 to-slate-800 rounded-xl flex items-center justify-center">
                 <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                     d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -345,8 +352,7 @@
                       <tr className="bg-gray-50">
                         <th className="text-left px-3 py-2 text-xs font-bold text-gray-400 uppercase rounded-l-lg">#</th>
                         <th className="text-left px-3 py-2 text-xs font-bold text-gray-400 uppercase">Name</th>
-                        <th className="text-left px-3 py-2 text-xs font-bold text-gray-400 uppercase">DT#</th>
-                        <th className="px-3 py-2 rounded-r-lg"></th>
+                        <th className="text-left px-3 py-2 text-xs font-bold text-gray-400 uppercase rounded-r-lg">DT#</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -354,17 +360,7 @@
                         <tr key={r.name} className="border-t border-gray-50">
                           <td className="px-3 py-2.5 text-gray-300 text-xs font-mono">{i+1}</td>
                           <td className="px-3 py-2.5 font-semibold text-gray-800">{r.name}</td>
-                          <td className="px-3 py-2.5 text-gray-500 font-mono text-xs">{r.dt || '—'}</td>
-                          <td className="px-3 py-2.5 text-right">
-                            <button onClick={() => removeResource(r.name)}
-                              className="text-gray-300 hover:text-red-500 hover:bg-red-50 p-1 rounded-lg transition-all"
-                              title="Remove resource">
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
-                          </td>
+                          <td className="px-3 py-2.5 text-gray-700 font-mono text-xs font-bold">{r.dt || '—'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -385,7 +381,7 @@
                           placeholder="DT#"
                           className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-400" />
                       </div>
-                      <button type="button" onClick={addResource}
+                      <button onClick={addResource}
                         className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition-colors">
                         + Add
                       </button>
@@ -393,32 +389,40 @@
                   </div>
 
                   {/* Delete existing resource */}
-                  <div className="border border-dashed border-red-200 rounded-xl p-4 bg-red-50">
-                    <p className="text-xs font-bold text-red-500 uppercase mb-3">Delete Existing Resource</p>
+                  <div className="border border-dashed border-red-200 rounded-xl p-4 bg-red-50/40">
+                    <p className="text-xs font-bold text-red-500 uppercase mb-1">Delete Existing Resource</p>
+                    <p className="text-xs text-gray-400 mb-3">Use this when a person leaves the roster or the company.</p>
                     <div className="flex gap-2 flex-wrap items-start">
-                      <div className="flex-1 min-w-[180px]">
+                      <div className="flex-1 min-w-[220px]">
                         <select
                           value={delName}
-                          onChange={e => { setDelName(e.target.value); setDelErr(''); }}
-                          className="w-full px-3 py-2 border border-red-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-red-400">
-                          <option value="">— Select Resource to Delete —</option>
+                          onChange={e => setDelName(e.target.value)}
+                          className="w-full px-3 py-2 border border-red-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-red-400 text-gray-700">
+                          <option value="">— Select Resource to Remove —</option>
                           {resList.map(r => (
                             <option key={r.name} value={r.name}>{r.name}{r.dt ? ` (${r.dt})` : ''}</option>
                           ))}
                         </select>
-                        {delErr && <p className="text-xs text-red-500 mt-0.5">{delErr}</p>}
                       </div>
-                      <button type="button"
-                        onClick={() => {
-                          if (!delName) { setDelErr('Select a resource to delete'); return; }
-                          removeResource(delName);
-                          setDelName('');
-                          setDelErr('');
-                        }}
-                        className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold transition-colors">
+                      <button
+                        disabled={!delName}
+                        onClick={() => { if (delName) { removeResource(delName); setDelName(''); } }}
+                        className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold transition-colors
+                          ${delName
+                            ? 'bg-red-600 hover:bg-red-700 text-white'
+                            : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
                         Delete
                       </button>
                     </div>
+                    {delName && (
+                      <p className="text-xs text-red-500 mt-2 font-medium">
+                        ⚠ This will also remove <span className="font-bold">{delName}</span> from all rotation groups.
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
@@ -436,7 +440,7 @@
                             onChange={e => setGroupLabel(gi, e.target.value)}
                             className="text-sm font-bold text-gray-700 bg-transparent border-b border-dashed border-gray-300 focus:outline-none focus:border-blue-400 px-1 py-0.5 w-40"
                           />
-                          <button type="button" onClick={() => removeGroup(gi)}
+                          <button onClick={() => removeGroup(gi)}
                             className="text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded-lg transition-colors">
                             Remove group
                           </button>
@@ -456,10 +460,8 @@
                           ))}
                         </div>
                         {available.length > 0 && (
-                          <select
-                            key={group.members.join(',')}
-                            defaultValue=""
-                            onChange={e => { if (e.target.value) addMember(gi, e.target.value); }}
+                          <select defaultValue=""
+                            onChange={e => { addMember(gi, e.target.value); e.target.value = ''; }}
                             className="text-xs px-2.5 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-400">
                             <option value="">+ Add member...</option>
                             {available.map(r => <option key={r.name} value={r.name}>{r.name}</option>)}
@@ -468,7 +470,7 @@
                       </div>
                     );
                   })}
-                  <button type="button" onClick={addGroup}
+                  <button onClick={addGroup}
                     className="w-full py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm font-semibold text-gray-400 hover:border-blue-300 hover:text-blue-500 transition-colors">
                     + Add New Group
                   </button>
@@ -659,8 +661,8 @@
       const sortedSel    = [...selected].sort();
 
       if (isLocked) return (
-        <div className="bg-white rounded-2xl shadow-sm border border-red-200 p-8 text-center">
-          <div className="w-16 h-16 bg-red-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+        <div className="bg-white rounded-2xl card-elevated border border-red-200 p-8 text-center bg-gradient-to-b from-white to-red-50/20">
+          <div className="w-16 h-16 bg-gradient-to-br from-red-100 to-red-50 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-sm shadow-red-100 ring-1 ring-red-100">
             <svg className="w-8 h-8 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                 d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
@@ -675,11 +677,11 @@
       );
 
       return (
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+        <div className="bg-white rounded-2xl card-elevated border border-gray-100/80 p-6">
           {/* Header */}
           <div className="flex items-center justify-between mb-5">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm">
+              <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl flex items-center justify-center shadow-sm shadow-blue-200">
                 <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                 </svg>
@@ -866,7 +868,7 @@
       const inp = 'px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors';
       const active = filters.fromDate || filters.toDate || filters.resource;
       return (
-        <div className={`bg-white rounded-2xl shadow-sm border p-4 transition-colors ${active ? 'border-blue-200' : 'border-gray-100'}`}>
+        <div className={`bg-white rounded-2xl card-elevated border p-4 transition-all ${active ? 'border-blue-300 shadow-blue-50' : 'border-gray-100/80'}`}>
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex items-center gap-2 mr-1">
               <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -964,9 +966,9 @@
       let rowNum = 0;
 
       return (
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+        <div className="bg-white rounded-2xl card-elevated border border-gray-100/80 overflow-hidden">
           <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100">
-            <div className="w-9 h-9 bg-slate-700 rounded-xl flex items-center justify-center shadow-sm">
+            <div className="w-9 h-9 bg-gradient-to-br from-slate-600 to-slate-800 rounded-xl flex items-center justify-center shadow-sm">
               <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
               </svg>
@@ -998,7 +1000,7 @@
           <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[700px]">
               <thead>
-                <tr className="bg-gray-50 text-left">
+                <tr className="bg-slate-50/80 text-left border-b border-slate-100">
                   <th className="px-4 py-3 text-xs font-bold text-gray-400 uppercase w-10">#</th>
                   <th className="px-4 py-3 text-xs font-bold text-gray-400 uppercase">Date</th>
                   <th className="px-4 py-3 text-xs font-bold text-gray-400 uppercase">Type</th>
@@ -1041,7 +1043,7 @@
                           </td>
                           <td className="px-4 py-3"><Badge type={entry.type} /></td>
                           <td className="px-4 py-3 font-semibold text-gray-800">{entry.resourceName}</td>
-                          <td className="px-4 py-3 text-gray-500 font-mono text-xs">{entry.dtNumber}</td>
+                          <td className="px-4 py-3 text-gray-700 font-mono text-sm font-bold">{entry.dtNumber}</td>
                           <td className="px-4 py-3 text-right font-bold text-blue-700">{fmtMoney(entry.amount)}</td>
                           <td className="px-4 py-3">
                             <button onClick={() => onDelete(entry.id)}
@@ -1096,12 +1098,12 @@
               })}
               </tbody>
               <tfoot>
-                <tr className="border-t-2 border-gray-300 bg-slate-800">
-                  <td colSpan={6} className="px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-wide">
+                <tr className="border-t-2 border-slate-700 bg-gradient-to-r from-slate-950 to-slate-800">
+                  <td colSpan={6} className="px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-widest">
                     Grand Total &middot; {enriched.length} entries &middot; {grouped.length} resources
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <span className="text-base font-bold text-emerald-400">{fmtMoney(sumTotal)}</span>
+                    <span className="text-base font-bold text-emerald-400 drop-shadow">{fmtMoney(sumTotal)}</span>
                   </td>
                   <td></td>
                 </tr>
@@ -1137,9 +1139,9 @@
       const chartData  = [...data].reverse().slice(-12);
 
       return (
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+        <div className="bg-white rounded-2xl card-elevated border border-gray-100/80 p-6">
           <div className="flex items-center gap-3 mb-5">
-            <div className="w-9 h-9 bg-emerald-600 rounded-xl flex items-center justify-center shadow-sm">
+            <div className="w-9 h-9 bg-gradient-to-br from-emerald-500 to-emerald-700 rounded-xl flex items-center justify-center shadow-sm shadow-emerald-200">
               <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                   d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
@@ -1156,11 +1158,11 @@
             {chartData.map(({ mk, total, count }) => (
               <div key={mk} className="flex items-center gap-3">
                 <span className="text-xs text-gray-500 w-16 shrink-0 text-right font-mono">{monthShort(mk)}</span>
-                <div className="flex-1 bg-gray-100 rounded-full h-6 overflow-hidden">
+                <div className="flex-1 bg-slate-100 rounded-full h-7 overflow-hidden shadow-inner">
                   {total > 0 && (
-                    <div className="h-full rounded-full flex items-center justify-end pr-2.5"
-                      style={{ width: `${Math.max(4, (total / maxTotal) * 100)}%`, background: 'linear-gradient(90deg,#3b82f6,#1d4ed8)' }}>
-                      <span className="text-white font-semibold" style={{ fontSize: '10px' }}>{fmtMoney(total)}</span>
+                    <div className="stat-bar-fill h-full rounded-full flex items-center justify-end pr-3"
+                      style={{ width: `${Math.max(4, (total / maxTotal) * 100)}%`, background: 'linear-gradient(90deg,#6366f1,#3b82f6,#1d4ed8)', boxShadow: '0 1px 6px rgba(59,130,246,0.4)' }}>
+                      <span className="text-white font-semibold drop-shadow-sm" style={{ fontSize: '10px' }}>{fmtMoney(total)}</span>
                     </div>
                   )}
                 </div>
@@ -1200,8 +1202,7 @@
                 <tr className="border-t-2 border-gray-200 bg-gray-50">
                   <td className="px-3 py-2.5 text-xs font-bold text-gray-500 uppercase">Grand Total</td>
                   <td className="px-3 py-2.5 text-center font-bold text-gray-700">{entries.length}</td>
-                  <td className="px-3 py-2.5 text-center font-bold text-gray-700">{new Set(entries.map(e => e.resourceName)).size}</td>
-                  <td></td>
+                  <td colSpan={2}></td>
                   <td className="px-3 py-2.5 text-right font-bold text-emerald-700 text-base">
                     {fmtMoney(entries.reduce((s,e) => s+e.total, 0))}
                   </td>
@@ -1230,17 +1231,7 @@
           const parsed = JSON.parse(s);
           /* Migrate old format (string[][]) → { label, members }[] */
           if (Array.isArray(parsed) && parsed.length > 0 && Array.isArray(parsed[0])) {
-            return parsed.map((members, i) => ({
-              label: DEFAULT_ROTATION_GROUPS[i]?.label || `Group ${i+1}`,
-              members,
-            }));
-          }
-          /* Migrate generic "Group N" labels to named defaults, preserving member lists */
-          if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].label) {
-            return parsed.map((g, i) => ({
-              ...g,
-              label: /^Group \d+$/.test(g.label) ? (DEFAULT_ROTATION_GROUPS[i]?.label || g.label) : g.label,
-            }));
+            return parsed.map((members, i) => ({ label: `Group ${i+1}`, members }));
           }
           return parsed;
         } catch { return DEFAULT_ROTATION_GROUPS; }
@@ -1378,7 +1369,7 @@
             if (!ws[addr]) ws[addr] = { v: '', t: 's' };
             ws[addr].s = {
               fill: { patternType: 'solid', fgColor: { rgb: GREEN } },
-              font: { bold: true, color: { rgb: WHITE }, name: 'Calibri', sz: 9 },
+              font: { bold: true, color: { rgb: WHITE }, name: 'Calibri', sz: 13 },
               alignment: { horizontal: 'center', vertical: 'center' },
               border: { bottom: { style: 'thin', color: { rgb: '006400' } } },
             };
@@ -1409,7 +1400,7 @@
           });
 
           /* Row height for header */
-          ws['!rows'] = [{ hpt: 18 }];
+          ws['!rows'] = [{ hpt: 26 }];
 
           const wb = XLSX.utils.book_new();
           XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
@@ -1423,12 +1414,12 @@
       const isLocked   = new Date().getDate() >= cutoffDay;
 
       return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-100 to-blue-50/30">
+        <div className="min-h-screen bg-gradient-to-br from-slate-100 via-blue-50/30 to-indigo-50/20">
 
           {/* ── Header ── */}
-          <header className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 shadow-xl sticky top-0 z-20">
+          <header className="bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 header-glow sticky top-0 z-20 border-b border-blue-500/20">
             <div className="max-w-7xl mx-auto px-6 py-4 flex items-center gap-4">
-              <div className="w-11 h-11 bg-blue-500 rounded-2xl flex items-center justify-center shadow-lg shrink-0">
+              <div className="w-11 h-11 bg-gradient-to-br from-blue-400 to-blue-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/30 shrink-0 ring-1 ring-blue-300/20">
                 <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
                     d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4M4 12c0 2.21 3.582 4 8 4s8-1.79 8-4" />
@@ -1436,10 +1427,10 @@
               </div>
               <div>
                 <h1 className="text-white text-xl font-bold tracking-tight">DBA OnCall Tracker</h1>
-                <p className="text-slate-400 text-xs">Database Administration Team · Oncall &amp; Maintenance Log</p>
+                <p className="text-blue-300/60 text-xs tracking-wide">Database Administration Team · Oncall &amp; Maintenance Log</p>
               </div>
               <button onClick={() => setShowSettings(true)}
-                className="ml-auto flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 rounded-xl text-sm font-semibold transition-colors">
+                className="ml-auto flex items-center gap-2 px-4 py-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-600/80 hover:border-slate-500 text-slate-200 rounded-xl text-sm font-semibold transition-all">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                     d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -1473,9 +1464,9 @@
 
             {/* Footer */}
             <div className="text-center pb-8 space-y-1">
-              <p className="text-xs text-gray-400">
+              <p className="text-sm font-bold text-red-500">
                 Data saved in browser local storage.
-                <span className="text-amber-600 font-medium"> Export to Excel regularly</span> for audit backup.
+                <span className="text-red-600"> Export to Excel regularly</span> for audit backup.
               </p>
               <p className="text-xs text-gray-300">DBA OnCall Tracker · {new Date().getFullYear()}</p>
             </div>
@@ -1498,8 +1489,8 @@
 
           {/* Toast */}
           {toast && (
-            <div className={`toast fixed bottom-6 right-6 z-50 px-5 py-3 rounded-2xl shadow-xl text-sm font-semibold flex items-center gap-2.5
-              ${toast.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-white'}`}>
+            <div className={`toast fixed bottom-6 right-6 z-50 px-5 py-3 rounded-2xl shadow-2xl text-sm font-semibold flex items-center gap-2.5 ring-1 ring-white/10
+              ${toast.type === 'success' ? 'bg-gradient-to-r from-emerald-600 to-emerald-500 text-white' : 'bg-gradient-to-r from-slate-800 to-slate-700 text-white'}`}>
               <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
                   d={toast.type==='success' ? 'M5 13l4 4L19 7' : 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z'} />
